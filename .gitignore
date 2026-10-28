@@ -1,0 +1,8 @@
+target/
+node_modules/
+dist/
+.superpowers/
+test-results/
+playwright-report/
+.DS_Store
+*.log
