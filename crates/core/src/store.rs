@@ -69,6 +69,15 @@ fn dedupe_key(p: &Play) -> String {
     )
 }
 
+/// A stored value this build does not know is an error, never a guess.
+fn unknown(column: usize, what: &str, value: &str) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        column,
+        rusqlite::types::Type::Text,
+        format!("unknown {what} {value:?}").into(),
+    )
+}
+
 impl Store {
     pub fn open(path: &Path) -> Result<Store> {
         if let Some(dir) = path.parent() {
@@ -167,9 +176,8 @@ impl Store {
         let rows = stmt.query_map([source.map(Source::as_str)], |r| {
             let (source, origin): (String, String) = (r.get(0)?, r.get(1)?);
             Ok(Play {
-                // ponytail: unknown values fall back instead of failing a whole read; only this code writes them.
-                source: Source::from_db(&source).unwrap_or(Source::Spotify),
-                origin: Origin::from_db(&origin).unwrap_or(Origin::Export),
+                source: Source::from_db(&source).ok_or_else(|| unknown(0, "source", &source))?,
+                origin: Origin::from_db(&origin).ok_or_else(|| unknown(1, "origin", &origin))?,
                 played_at: r.get(2)?,
                 duration_ms: r.get(3)?,
                 creator: r.get(4)?,
@@ -188,6 +196,14 @@ impl Store {
             "DELETE FROM plays WHERE source = ?1 AND origin = 'api' AND played_at <= ?2",
             params![source.as_str(), ts],
         )? as u64)
+    }
+
+    pub fn has_demo_data(&self) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM plays WHERE origin = 'demo')",
+            [],
+            |r| r.get(0),
+        )?)
     }
 
     pub fn delete_origin(&mut self, source: Source, origin: Origin) -> Result<u64> {
@@ -220,6 +236,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::Error;
 
     fn play(source: Source, creator: &str, item: &str, played_at: i64) -> Play {
         Play {
@@ -328,6 +345,27 @@ mod tests {
     }
 
     #[test]
+    fn has_demo_data_ignores_other_origins() {
+        let mut store = Store::open_in_memory().unwrap();
+        assert!(!store.has_demo_data().unwrap());
+        let mut real = play(Source::Spotify, "Real Band", "Real Song", 100_000);
+        real.origin = Origin::Export;
+        store.insert_plays(&[real]).unwrap();
+        assert!(!store.has_demo_data().unwrap());
+        store
+            .insert_plays(&[play(
+                Source::Youtube,
+                "Slow Math Club",
+                "Why Zero Matters",
+                200_000,
+            )])
+            .unwrap();
+        assert!(store.has_demo_data().unwrap());
+        store.delete_origin(Source::Youtube, Origin::Demo).unwrap();
+        assert!(!store.has_demo_data().unwrap());
+    }
+
+    #[test]
     fn replace_api_plays_before_is_inclusive_and_scoped() {
         let mut store = Store::open_in_memory().unwrap();
         let with = |source, origin, creator: &str, at| Play {
@@ -378,6 +416,25 @@ mod tests {
             (plays[0].origin, plays[0].played_at),
             (Origin::Export, 1010)
         );
+    }
+
+    #[test]
+    fn unknown_source_or_origin_is_an_error() {
+        for (source, origin) in [("tidal", "export"), ("spotify", "scrape")] {
+            let store = Store::open_in_memory().unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO plays (source, origin, played_at, creator, item, dedupe_key)
+                     VALUES (?1, ?2, 1, 'A', 'T', 'k')",
+                    [source, origin],
+                )
+                .unwrap();
+            assert!(matches!(
+                store.plays(None),
+                Err(Error::Db(rusqlite::Error::FromSqlConversionFailure(..)))
+            ));
+        }
     }
 
     #[test]
