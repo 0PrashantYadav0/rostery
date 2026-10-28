@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// How much of a file is looked at to tell which Export it is from.
 const SNIFF_BYTES: usize = 4096;
@@ -139,9 +140,12 @@ impl Import<'_> {
 
     /// One transaction per file.
     fn add(&mut self, label: &str, format: Format, bytes: &[u8]) -> Result<()> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
         let parsed = match format {
-            Format::SpotifyExtended => spotify_export::parse_extended(bytes),
-            Format::SpotifyAccount => spotify_export::parse_account(bytes),
+            Format::SpotifyExtended => spotify_export::parse_extended(bytes, now),
+            Format::SpotifyAccount => spotify_export::parse_account(bytes, now),
             // Task 3 replaces this arm.
             Format::TakeoutActivity => {
                 return Err(Error::Import(format!(

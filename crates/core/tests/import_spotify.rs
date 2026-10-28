@@ -6,7 +6,7 @@ use rostery_core::store::Store;
 use serde_json::{json, Value};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 
 /// 2024-03-01 13:05:00 UTC.
@@ -311,7 +311,16 @@ fn rows_missing_time_are_rejected() {
 fn rows_with_a_bad_time_or_no_item_are_rejected() {
     let video = json!({"ts": "2024-03-01T13:11:00Z", "ms_played": 5000,
         "master_metadata_track_name": null, "episode_name": null});
-    let (_, summary) = import_rows(json!([
+    let mut number_time = extended("x", "Moth Season", "Soft Static", 200_000);
+    number_time["ts"] = json!(12345);
+    let mut text_duration = extended(
+        "2024-03-01T13:13:00Z",
+        "Moth Season",
+        "Soft Static",
+        200_000,
+    );
+    text_duration["ms_played"] = json!("abc");
+    let (store, summary) = import_rows(json!([
         extended("last Tuesday", "Moth Season", "Soft Static", 200_000),
         extended(
             "2024-13-45T25:61:00Z",
@@ -320,8 +329,129 @@ fn rows_with_a_bad_time_or_no_item_are_rejected() {
             200_000
         ),
         video,
+        number_time,
+        text_duration,
+        42,
+        extended(
+            "2024-03-01T13:05:00Z",
+            "The Paper Lanterns",
+            "Low Tide",
+            200_000
+        ),
     ]));
-    assert_eq!((summary.rejected, summary.added), (3, 0));
+    assert_eq!((summary.rejected, summary.added), (6, 1));
+    assert_eq!(store.plays(None).unwrap()[0].item, "Low Tide");
+}
+
+/// Imports the rows as one account-format file into a fresh in-memory Store.
+fn import_account_rows(rows: Value) -> (Store, ImportSummary) {
+    let dir = TempDir::new().unwrap();
+    let file = write_json(dir.path(), "StreamingHistory_music_0.json", &rows);
+    let mut store = Store::open_in_memory().unwrap();
+    let summary = import_path(&mut store, &file).unwrap();
+    (store, summary)
+}
+
+#[test]
+fn account_rows_of_the_wrong_type_are_rejected() {
+    let (_, summary) = import_account_rows(json!([
+        {"endTime": "2024-03-01 13:05", "artistName": "A", "trackName": "T", "msPlayed": 200_000},
+        {"endTime": 12345, "artistName": "A", "trackName": "T", "msPlayed": 200_000},
+        "not a row",
+    ]));
+    assert_eq!((summary.rejected, summary.added), (2, 1));
+}
+
+#[test]
+fn account_podcasts_use_show_as_creator() {
+    let (store, summary) = import_account_rows(json!([{
+        "endTime": "2024-03-01 13:05",
+        "podcastName": "Slow Math Weekly",
+        "episodeName": "Why Zero Matters",
+        "msPlayed": 1_800_000,
+    }]));
+    assert_eq!((summary.rejected, summary.added), (0, 1));
+    let play = &store.plays(None).unwrap()[0];
+    assert_eq!(play.creator, "Slow Math Weekly");
+    assert_eq!(play.item, "Why Zero Matters");
+}
+
+#[test]
+fn durations_out_of_range_are_rejected() {
+    const THIRTY_DAYS_MS: i64 = 2_592_000_000;
+    let (store, summary) = import_rows(json!([
+        extended("2024-03-01T13:05:00Z", "A", "T", i64::MAX),
+        extended("2024-03-01T13:06:00Z", "A", "U", i64::MAX),
+        extended("2024-03-01T13:07:00Z", "A", "V", -6_000_000_000_i64),
+        extended("2024-03-01T13:08:00Z", "A", "W", -1),
+        extended("2024-03-01T13:09:00Z", "A", "X", THIRTY_DAYS_MS + 1),
+        extended("2024-03-01T13:10:00Z", "A", "Y", THIRTY_DAYS_MS),
+        extended("2024-03-01T13:11:00Z", "A", "Z", 0),
+    ]));
+    assert_eq!((summary.rejected, summary.added), (5, 2));
+    // Before the range check this failed with an integer overflow, on every launch.
+    assert_eq!(store.totals().unwrap().spotify.minutes, 43_200);
+}
+
+#[test]
+fn impossible_or_unbelievable_dates_are_rejected() {
+    let two_days_ahead = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+        + 2 * 86_400;
+    for ts in [
+        "2024-02-31T00:00:00Z".to_string(),
+        "2023-02-29T00:00:00Z".to_string(),
+        "2024-04-31T00:00:00Z".to_string(),
+        "0000-01-01T00:00:00Z".to_string(),
+        "1999-12-31T23:59:59Z".to_string(),
+        "9999-12-31T23:59:59Z".to_string(),
+        format_ts(two_days_ahead),
+    ] {
+        let (store, summary) = import_rows(json!([extended(&ts, "A", "T", 200_000)]));
+        assert_eq!((summary.rejected, summary.added), (1, 0), "{ts}");
+        assert!(store.plays(None).unwrap().is_empty(), "{ts}");
+    }
+    let (_, leap_day) = import_rows(json!([extended("2024-02-29T12:00:00Z", "A", "T", 200_000)]));
+    assert_eq!((leap_day.rejected, leap_day.added), (0, 1));
+}
+
+#[test]
+fn a_far_future_row_does_not_delete_api_plays() {
+    let api = |at: i64, creator: &str| Play {
+        source: Source::Spotify,
+        origin: Origin::Api,
+        played_at: at,
+        duration_ms: None,
+        creator: creator.into(),
+        creator_ref: None,
+        item: "Song".into(),
+        item_ref: None,
+        skipped: false,
+    };
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .insert_plays(&[
+            api(1_700_000_000, "Older Api Band"),
+            api(1_790_000_000, "Newer Api Band"),
+        ])
+        .unwrap();
+    let dir = TempDir::new().unwrap();
+    let file = write_json(
+        dir.path(),
+        "Streaming_History_Audio_2024_0.json",
+        &json!([extended("9999-12-31T23:59:59Z", "Forged", "Row", 200_000)]),
+    );
+    let summary = import_path(&mut store, &file).unwrap();
+    assert_eq!((summary.rejected, summary.added), (1, 0));
+    let left: Vec<String> = store
+        .plays(None)
+        .unwrap()
+        .into_iter()
+        .map(|p| p.creator)
+        .collect();
+    assert_eq!(left, ["Older Api Band", "Newer Api Band"]);
 }
 
 #[test]

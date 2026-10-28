@@ -13,7 +13,7 @@ describe('describeImport', () => {
       describeImport({ ...noImport, added: 1, duplicates: 1, excludedPrivate: 1, excludedAds: 1, rejected: 1 }),
     ).toBe(
       'Added 1 Play. 1 Play was already here. Skipped 1 private session. Skipped 1 ad. ' +
-        'Left out 1 row with no readable time or title.',
+        'Left out 1 row Rostery could not use.',
     );
   });
 

@@ -28,6 +28,6 @@ export function describeImport(s: ImportSummary): string {
   if (s.duplicates) parts.push(`${count(s.duplicates, 'Play was', 'Plays were')} already here.`);
   if (s.excludedPrivate) parts.push(`Skipped ${count(s.excludedPrivate, 'private session', 'private sessions')}.`);
   if (s.excludedAds) parts.push(`Skipped ${count(s.excludedAds, 'ad', 'ads')}.`);
-  if (s.rejected) parts.push(`Left out ${count(s.rejected, 'row', 'rows')} with no readable time or title.`);
+  if (s.rejected) parts.push(`Left out ${count(s.rejected, 'row', 'rows')} Rostery could not use.`);
   return parts.join(' ');
 }
