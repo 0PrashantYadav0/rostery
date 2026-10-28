@@ -1,0 +1,13 @@
+[package]
+name = "rostery-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+default-run = "rostery-app"
+
+[dependencies]
+rostery-core = { version = "0.1.0", path = "../crates/core" }
+tauri = { version = "2.12.5", features = [] }
+
+[build-dependencies]
+tauri-build = { version = "2.7.4", features = [] }
