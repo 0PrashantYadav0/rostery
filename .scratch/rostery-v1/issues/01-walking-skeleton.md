@@ -4,9 +4,9 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Rostery opens as a native window
-- [ ] "Try demo data" loads fictional Plays for both Sources and shows the totals
-- [ ] Loading the same demo twice does not double the numbers
-- [ ] Core tests and one browser test pass without any account
+- [x] Rostery opens as a native window
+- [x] "Try demo data" loads fictional Plays for both Sources and shows the totals
+- [x] Loading the same demo twice does not double the numbers
+- [x] Core tests and one browser test pass without any account
