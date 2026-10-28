@@ -5,8 +5,9 @@ mod spotify_export;
 
 use crate::error::{Error, Result};
 use crate::model::Source;
-use crate::store::Store;
+use crate::store::{dedupe_key, Store};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -57,6 +58,8 @@ pub fn import_path(store: &mut Store, path: &Path) -> Result<ImportSummary> {
         store,
         summary: ImportSummary::default(),
         newest_spotify: None,
+        private: HashSet::new(),
+        removed_private: 0,
     };
     run.path(path)?;
     if run.summary.files_read == 0 {
@@ -72,6 +75,7 @@ pub fn import_path(store: &mut Store, path: &Path) -> Result<ImportSummary> {
     if let Some(ts) = run.newest_spotify {
         run.store.replace_api_plays_before(Source::Spotify, ts)?;
     }
+    run.summary.added = run.summary.added.saturating_sub(run.removed_private);
     Ok(run.summary)
 }
 
@@ -79,6 +83,10 @@ struct Import<'a> {
     store: &'a mut Store,
     summary: ImportSummary,
     newest_spotify: Option<i64>,
+    /// Dedupe keys of the private rows seen so far in this import.
+    private: HashSet<String>,
+    /// Stored Plays taken back out because a private row named them.
+    removed_private: u64,
 }
 
 impl Import<'_> {
@@ -143,7 +151,7 @@ impl Import<'_> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs() as i64);
-        let parsed = match format {
+        let mut parsed = match format {
             Format::SpotifyExtended => spotify_export::parse_extended(bytes, now),
             Format::SpotifyAccount => spotify_export::parse_account(bytes, now),
             // Task 3 replaces this arm.
@@ -158,6 +166,18 @@ impl Import<'_> {
                 "Rostery could not read {label}: {e}. Download the Export again from the Source and retry."
             ))
         })?;
+        // Account data has no private flag, so an extended private row also speaks for the
+        // account copy of the same Play, stored already or later in this import.
+        // ponytail: an account file imported on its own after the extended one still stores the
+        // Play. Catching that means writing private Plays to disk, which they must never reach.
+        let private: Vec<String> = parsed.private.iter().map(dedupe_key).collect();
+        self.removed_private += self.store.delete_by_dedupe_key(&private)?;
+        self.private.extend(private);
+        if !self.private.is_empty() {
+            parsed
+                .plays
+                .retain(|p| !self.private.contains(&dedupe_key(p)));
+        }
         let newest = parsed.plays.iter().map(|p| p.played_at).max();
         self.newest_spotify = self.newest_spotify.max(newest);
         let count = self.store.insert_plays(&parsed.plays)?;

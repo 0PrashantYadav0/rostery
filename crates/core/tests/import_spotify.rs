@@ -235,7 +235,106 @@ fn account_and_extended_do_not_double_count() {
         (summary.files_read, summary.added, summary.duplicates),
         (2, 1, 1)
     );
-    assert_eq!(store.plays(None).unwrap().len(), 1);
+    // The account file sorts first, and the richer extended copy is still the one kept.
+    let plays = store.plays(None).unwrap();
+    assert_eq!(plays.len(), 1);
+    assert_eq!(plays[0].played_at, MINUTE + 42);
+    assert!(plays[0].item_ref.is_some());
+}
+
+#[test]
+fn extended_fills_in_the_account_copy_whichever_comes_first() {
+    let dir = TempDir::new().unwrap();
+    let mut row = extended("2024-03-01T13:05:42Z", "A", "T", 150_000);
+    row["skipped"] = json!(true);
+    let ext = write_json(dir.path(), "ext.json", &json!([row]));
+    let account = write_json(
+        dir.path(),
+        "account.json",
+        &json!([{"endTime": "2024-03-01 13:05", "artistName": "A", "trackName": "T", "msPlayed": 200_000}]),
+    );
+    let rich = Play {
+        source: Source::Spotify,
+        origin: Origin::Export,
+        played_at: MINUTE + 42,
+        duration_ms: Some(150_000),
+        creator: "A".into(),
+        creator_ref: None,
+        item: "T".into(),
+        item_ref: Some("spotify:track:4uLU6hMCjMI75M1A2tKUQC".into()),
+        skipped: true,
+    };
+
+    let mut store = Store::open_in_memory().unwrap();
+    assert_eq!(import_path(&mut store, &account).unwrap().added, 1);
+    let upgrade = import_path(&mut store, &ext).unwrap();
+    assert_eq!((upgrade.added, upgrade.duplicates), (0, 1));
+    assert_eq!(store.plays(None).unwrap(), std::slice::from_ref(&rich));
+    // An account copy never takes those details away again.
+    import_path(&mut store, &account).unwrap();
+    assert_eq!(store.plays(None).unwrap(), std::slice::from_ref(&rich));
+
+    let mut store = Store::open_in_memory().unwrap();
+    import_path(&mut store, &ext).unwrap();
+    let later = import_path(&mut store, &account).unwrap();
+    assert_eq!((later.added, later.duplicates), (0, 1));
+    assert_eq!(store.plays(None).unwrap(), [rich]);
+}
+
+fn private_row() -> Value {
+    let mut row = extended(
+        "2024-03-01T13:09:00Z",
+        "Velvet Anchor",
+        "Quiet Hours",
+        200_000,
+    );
+    row["incognito_mode"] = json!(true);
+    row
+}
+
+fn account_rows() -> Value {
+    json!([
+        {"endTime": "2024-03-01 13:09", "artistName": "Velvet Anchor", "trackName": "Quiet Hours", "msPlayed": 200_000},
+        {"endTime": "2024-03-01 13:05", "artistName": "Moth Season", "trackName": "Soft Static", "msPlayed": 200_000},
+    ])
+}
+
+#[test]
+fn a_private_flag_covers_the_account_copy_in_one_import() {
+    // File names decide the walk order. Formats are read from the content.
+    for (ext, account) in [("b.json", "a.json"), ("a.json", "b.json")] {
+        let dir = TempDir::new().unwrap();
+        write_json(dir.path(), ext, &json!([private_row()]));
+        write_json(dir.path(), account, &account_rows());
+        let mut store = Store::open_in_memory().unwrap();
+        let summary = import_path(&mut store, dir.path()).unwrap();
+        let left: Vec<String> = store
+            .plays(None)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.creator)
+            .collect();
+        assert_eq!(left, ["Moth Season"], "extended file is {ext}");
+        assert_eq!(
+            (summary.added, summary.excluded_private),
+            (1, 1),
+            "extended file is {ext}"
+        );
+    }
+}
+
+#[test]
+fn a_private_flag_removes_the_account_copy_of_an_earlier_import() {
+    let dir = TempDir::new().unwrap();
+    let account = write_json(dir.path(), "account.json", &account_rows());
+    let ext = write_json(dir.path(), "ext.json", &json!([private_row()]));
+    let mut store = Store::open_in_memory().unwrap();
+    assert_eq!(import_path(&mut store, &account).unwrap().added, 2);
+    let summary = import_path(&mut store, &ext).unwrap();
+    assert_eq!((summary.added, summary.excluded_private), (0, 1));
+    let left = store.plays(None).unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].creator, "Moth Season");
 }
 
 #[test]

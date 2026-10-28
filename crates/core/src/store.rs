@@ -59,7 +59,7 @@ pub struct InsertCount {
 }
 
 /// Minute precision lets Spotify's minutes-only and seconds formats collapse into one Play.
-fn dedupe_key(p: &Play) -> String {
+pub(crate) fn dedupe_key(p: &Play) -> String {
     format!(
         "{}|{}|{}|{}",
         p.source.as_str(),
@@ -99,11 +99,17 @@ impl Store {
 
     /// One transaction. A Play that is already stored (same dedupe key) counts as a duplicate,
     /// except that an Export Play takes over an API Play it repeats, so an Export import
-    /// never loses the Play to the API copy it is about to replace.
+    /// never loses the Play to the API copy it is about to replace. A duplicate with an
+    /// `item_ref` also fills in an Export copy that has none, which is how an extended row
+    /// improves on the account row of the same Play.
     pub fn insert_plays(&mut self, plays: &[Play]) -> Result<InsertCount> {
         let tx = self.conn.transaction()?;
         let mut added = 0;
         {
+            let mut fill_in = tx.prepare(
+                "UPDATE plays SET played_at = ?1, duration_ms = ?2, item_ref = ?3, skipped = ?4
+                 WHERE dedupe_key = ?5 AND origin = 'export' AND item_ref IS NULL",
+            )?;
             let mut stmt = tx.prepare(
                 "INSERT INTO plays
                  (source, origin, played_at, duration_ms, creator, creator_ref,
@@ -116,7 +122,8 @@ impl Store {
                  WHERE plays.origin = 'api' AND excluded.origin = 'export'",
             )?;
             for p in plays {
-                added += stmt.execute(params![
+                let key = dedupe_key(p);
+                let stored = stmt.execute(params![
                     p.source.as_str(),
                     p.origin.as_str(),
                     p.played_at,
@@ -126,8 +133,18 @@ impl Store {
                     p.item,
                     p.item_ref,
                     p.skipped,
-                    dedupe_key(p),
-                ])? as u64;
+                    key,
+                ])?;
+                added += stored as u64;
+                if stored == 0 && p.origin == Origin::Export && p.item_ref.is_some() {
+                    fill_in.execute(params![
+                        p.played_at,
+                        p.duration_ms,
+                        p.item_ref,
+                        p.skipped,
+                        key
+                    ])?;
+                }
             }
         }
         tx.commit()?;
@@ -196,6 +213,20 @@ impl Store {
             "DELETE FROM plays WHERE source = ?1 AND origin = 'api' AND played_at <= ?2",
             params![source.as_str(), ts],
         )? as u64)
+    }
+
+    /// One transaction. Returns how many of these Plays were stored.
+    pub(crate) fn delete_by_dedupe_key(&mut self, keys: &[String]) -> Result<u64> {
+        let tx = self.conn.transaction()?;
+        let mut removed = 0;
+        {
+            let mut stmt = tx.prepare("DELETE FROM plays WHERE dedupe_key = ?1")?;
+            for key in keys {
+                removed += stmt.execute([key])? as u64;
+            }
+        }
+        tx.commit()?;
+        Ok(removed)
     }
 
     pub fn has_demo_data(&self) -> Result<bool> {

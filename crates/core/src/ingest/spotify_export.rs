@@ -18,6 +18,8 @@ const CLOCK_SLACK: i64 = 86_400;
 #[derive(Default)]
 pub struct Parsed {
     pub plays: Vec<Play>,
+    /// Private rows readable enough to name the Play. They are never stored.
+    pub private: Vec<Play>,
     pub excluded_private: u64,
     pub rejected: u64,
 }
@@ -69,12 +71,8 @@ fn each_row<T: DeserializeOwned>(
 
 pub fn parse_extended(bytes: &[u8], now: i64) -> serde_json::Result<Parsed> {
     each_row(bytes, |out, r: Extended| {
-        if r.incognito_mode == Some(true) {
-            out.excluded_private += 1;
-            return;
-        }
         // A podcast row has no track, and its show plays the part of the artist.
-        out.keep(play(
+        let play = play(
             r.ts.as_deref(),
             r.master_metadata_album_artist_name.or(r.episode_show_name),
             r.master_metadata_track_name.or(r.episode_name),
@@ -82,7 +80,13 @@ pub fn parse_extended(bytes: &[u8], now: i64) -> serde_json::Result<Parsed> {
             r.ms_played,
             r.skipped == Some(true),
             now,
-        ));
+        );
+        if r.incognito_mode == Some(true) {
+            out.excluded_private += 1;
+            out.private.extend(play);
+        } else {
+            out.keep(play);
+        }
     })
 }
 
