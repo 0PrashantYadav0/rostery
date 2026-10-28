@@ -1,6 +1,6 @@
 //! Importing a Spotify Export. Every name and address here is invented.
 
-use rostery_core::ingest::{import_path, ImportSummary};
+use rostery_core::ingest::{import_path, import_paths, ImportSummary};
 use rostery_core::model::{Origin, Play, Source};
 use rostery_core::store::Store;
 use serde_json::{json, Value};
@@ -562,6 +562,186 @@ fn unrecognised_input_explains_what_to_do() {
         let message = import_path(&mut store, input).unwrap_err().to_string();
         assert!(message.contains("Spotify"), "{message}");
         assert!(message.contains("Google Takeout"), "{message}");
+    }
+}
+
+/// One Play as extended-format bytes.
+fn history_bytes() -> Vec<u8> {
+    serde_json::to_vec(&json!([extended(
+        "2024-03-01T13:05:00Z",
+        "The Paper Lanterns",
+        "Low Tide",
+        200_000
+    )]))
+    .unwrap()
+}
+
+/// Valid JSON that looks like history in its first 4 KB, as a Wrapped summary might.
+const LOOK_ALIKE: &[u8] = br#"{"yearlyMetrics":{"msPlayed":1200}}"#;
+const TAKEOUT: &[u8] =
+    br#"[{"titleUrl":"https://www.youtube.com/watch?v=abc","products":["YouTube"]}]"#;
+
+#[test]
+fn a_stray_file_in_a_folder_is_counted_and_the_rest_imported() {
+    // Sorted first and last, so a stop at either one would show.
+    for name in ["aaa_not_really.zip", "zzz_not_really.zip"] {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(name), b"not a zip").unwrap();
+        std::fs::write(dir.path().join("history.json"), history_bytes()).unwrap();
+        let mut store = Store::open_in_memory().unwrap();
+        let summary = import_path(&mut store, dir.path()).unwrap();
+        assert_eq!(
+            (summary.files_read, summary.files_skipped, summary.added),
+            (1, 1, 1),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_broken_or_takeout_file_is_skipped_inside_a_folder_or_zip() {
+    let entries = [
+        ("broken.json", br#"[{"ms_played": 5"#.as_slice()),
+        ("takeout.json", TAKEOUT),
+        ("history.json", &history_bytes()),
+        ("later.json", br#"[{"ms_played": 5"#),
+    ];
+    let dir = TempDir::new().unwrap();
+    let zip = write_zip(
+        dir.path(),
+        "export.zip",
+        &entries.map(|(name, bytes)| (name, bytes.to_vec())),
+    );
+    let folder = dir.path().join("folder");
+    std::fs::create_dir(&folder).unwrap();
+    for (name, bytes) in entries {
+        std::fs::write(folder.join(name), bytes).unwrap();
+    }
+    for input in [zip.as_path(), folder.as_path()] {
+        let mut store = Store::open_in_memory().unwrap();
+        let summary = import_path(&mut store, input).unwrap();
+        assert_eq!(
+            (summary.files_read, summary.files_skipped, summary.added),
+            (1, 3, 1)
+        );
+    }
+}
+
+#[test]
+fn a_look_alike_is_not_history_and_is_not_a_problem() {
+    let dir = TempDir::new().unwrap();
+    let zip = write_zip(
+        dir.path(),
+        "export.zip",
+        &[
+            ("Wrapped2024.json", LOOK_ALIKE.to_vec()),
+            ("history.json", history_bytes()),
+        ],
+    );
+    let mut store = Store::open_in_memory().unwrap();
+    let summary = import_path(&mut store, &zip).unwrap();
+    assert_eq!(
+        (summary.files_read, summary.files_skipped, summary.added),
+        (1, 0, 1)
+    );
+}
+
+#[test]
+fn the_one_path_chosen_still_fails_with_a_message() {
+    let dir = TempDir::new().unwrap();
+    let import = |name: &str, bytes: &[u8]| {
+        let file = dir.path().join(name);
+        std::fs::write(&file, bytes).unwrap();
+        import_path(&mut Store::open_in_memory().unwrap(), &file)
+            .unwrap_err()
+            .to_string()
+    };
+    assert!(import("export.zip", b"not a zip").contains("Download the zip"));
+    assert!(import("broken.json", br#"[{"ms_played": 5"#).contains("broken.json"));
+    assert!(import("takeout.json", TAKEOUT).contains("not available yet"));
+    assert!(import("Wrapped2024.json", LOOK_ALIKE).contains("did not find"));
+}
+
+#[test]
+fn when_nothing_could_be_read_the_first_problem_is_the_error() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("export.zip"), b"not a zip").unwrap();
+    let mut store = Store::open_in_memory().unwrap();
+    let message = import_path(&mut store, dir.path()).unwrap_err().to_string();
+    assert!(message.contains("export.zip"), "{message}");
+}
+
+#[test]
+fn a_skipped_file_keeps_api_plays_it_might_have_held() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("broken.json"), br#"[{"ms_played": 5"#).unwrap();
+    std::fs::write(dir.path().join("history.json"), history_bytes()).unwrap();
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .insert_plays(&[Play {
+            source: Source::Spotify,
+            origin: Origin::Api,
+            played_at: MINUTE - 3600,
+            duration_ms: None,
+            creator: "Older Api Band".into(),
+            creator_ref: None,
+            item: "Song".into(),
+            item_ref: None,
+            skipped: false,
+        }])
+        .unwrap();
+    import_path(&mut store, dir.path()).unwrap();
+    assert_eq!(store.plays(None).unwrap().len(), 2);
+}
+
+#[test]
+fn several_paths_are_one_import() {
+    let dir = TempDir::new().unwrap();
+    let first = write_json(
+        dir.path(),
+        "first.json",
+        &json!([extended("2024-03-01T13:05:00Z", "A", "T", 200_000)]),
+    );
+    let not_history = write_json(dir.path(), "Userdata.json", &json!({"username": "x"}));
+    let look_alike = dir.path().join("Wrapped2024.json");
+    std::fs::write(&look_alike, LOOK_ALIKE).unwrap();
+    let bad_zip = dir.path().join("bad.zip");
+    std::fs::write(&bad_zip, b"not a zip").unwrap();
+    let last = write_json(
+        dir.path(),
+        "last.json",
+        &json!([extended("2024-03-01T13:09:00Z", "A", "U", 200_000)]),
+    );
+
+    let mut store = Store::open_in_memory().unwrap();
+    let summary = import_paths(
+        &mut store,
+        &[&first, &not_history, &look_alike, &bad_zip, &last],
+    )
+    .unwrap();
+    assert_eq!(
+        (summary.files_read, summary.files_skipped, summary.added),
+        (2, 1, 2)
+    );
+
+    // Nothing usable in any of them is an error, as it is for one path.
+    let mut store = Store::open_in_memory().unwrap();
+    let message = import_paths(&mut store, &[&not_history, &look_alike])
+        .unwrap_err()
+        .to_string();
+    assert!(message.contains("did not find"), "{message}");
+}
+
+#[test]
+fn a_private_flag_covers_the_account_copy_across_several_paths() {
+    let dir = TempDir::new().unwrap();
+    let account = write_json(dir.path(), "account.json", &account_rows());
+    let ext = write_json(dir.path(), "ext.json", &json!([private_row()]));
+    for paths in [[&account, &ext], [&ext, &account]] {
+        let mut store = Store::open_in_memory().unwrap();
+        let summary = import_paths(&mut store, &paths).unwrap();
+        assert_eq!((summary.added, summary.excluded_private), (1, 1));
+        assert_eq!(store.plays(None).unwrap().len(), 1);
     }
 }
 

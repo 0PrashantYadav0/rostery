@@ -105,7 +105,7 @@ settings(key PRIMARY KEY, value)
 
 `dedupe_key` is `source|floor(played_at/60)|creator|item`. Minute precision lets Spotify's account format, which only has minutes, and its extended format, which has seconds, collapse into one Play, and the extended copy's details are kept whichever is imported first. Re-importing a file adds nothing. `played_at` is Unix seconds in UTC.
 
-Two rules keep Origins consistent. When an Export is imported, API Plays of that Source at or before the Export's newest Play are deleted. When a Connection syncs, Plays at or before the newest Export Play are skipped.
+Two rules keep Origins consistent. When an Export is imported and every file in it could be read, API Plays of that Source at or before the Export's newest Play are deleted. When a Connection syncs, Plays at or before the newest Export Play are skipped.
 
 Private sessions (`incognito_mode: true`) and Google ads (`details` holding "From Google Ads") are dropped at ingest and counted in the import summary. Spotify's account format has no private flag, so an extended private row also removes the account copy of that Play, whether it is already stored or comes later in the same import. An account file imported on its own after the extended one cannot be caught, because remembering private Plays would mean writing them to disk. A YouTube video that has since been deleted has no `subtitles`. It is kept with an empty Creator because it makes a good joke, and it never becomes a Planet.
 

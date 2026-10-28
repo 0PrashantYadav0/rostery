@@ -29,6 +29,7 @@ pub enum Format {
 #[serde(rename_all = "camelCase")]
 pub struct ImportSummary {
     pub files_read: u32,
+    pub files_skipped: u32,
     pub added: u64,
     pub duplicates: u64,
     pub excluded_private: u64,
@@ -53,28 +54,45 @@ pub fn detect_format(head: &[u8]) -> Option<Format> {
 
 /// Imports every history file found in `path`: a `.json`, a `.zip` or a folder, recursively.
 pub fn import_path(store: &mut Store, path: &Path) -> Result<ImportSummary> {
-    std::fs::metadata(path).map_err(|e| unreadable(path, e))?;
+    import_paths(store, &[path])
+}
+
+/// One import of everything found in `paths`. A problem with the only path the person chose is an
+/// error. Among several, that path is one more stray file, like any inside a folder or a zip.
+pub fn import_paths(store: &mut Store, paths: &[impl AsRef<Path>]) -> Result<ImportSummary> {
     let mut run = Import {
         store,
         summary: ImportSummary::default(),
         newest_spotify: None,
         private: HashSet::new(),
         removed_private: 0,
+        first_skip: None,
     };
-    run.path(path)?;
-    if run.summary.files_read == 0 {
-        return Err(Error::Import(
-            "Rostery did not find a Spotify or YouTube Export there. Choose the .zip, the .json files \
-             or the folder from Spotify's \"Download your data\" (Extended streaming history or \
-             Account data), or the watch history JSON from Google Takeout. A Takeout in HTML cannot \
-             be read, so request it again as JSON."
-                .into(),
-        ));
+    if let [only] = paths {
+        run.path(only.as_ref())?;
+    } else {
+        for path in paths {
+            let result = run.path(path.as_ref());
+            run.skip_bad_file(result)?;
+        }
     }
-    // The Export now holds every API Play up to its newest, so those copies can go.
-    if let Some(ts) = run.newest_spotify {
+    if run.summary.files_read == 0 {
+        return Err(run.first_skip.unwrap_or_else(|| {
+            Error::Import(
+                "Rostery did not find a Spotify or YouTube Export there. Choose the .zip, the .json files \
+                 or the folder from Spotify's \"Download your data\" (Extended streaming history or \
+                 Account data), or the watch history JSON from Google Takeout. A Takeout in HTML cannot \
+                 be read, so request it again as JSON."
+                    .into(),
+            )
+        }));
+    }
+    // The Export now holds every API Play up to its newest, so those copies can go. With a file
+    // left unread that is not certain, and an API Play cannot be fetched again.
+    if let (Some(ts), 0) = (run.newest_spotify, run.summary.files_skipped) {
         run.store.replace_api_plays_before(Source::Spotify, ts)?;
     }
+    // Net of what private rows took back out, so `added` matches what the dials gain.
     run.summary.added = run.summary.added.saturating_sub(run.removed_private);
     Ok(run.summary)
 }
@@ -87,10 +105,26 @@ struct Import<'a> {
     private: HashSet<String>,
     /// Stored Plays taken back out because a private row named them.
     removed_private: u64,
+    /// Becomes the error when no file at all could be read.
+    first_skip: Option<Error>,
 }
 
 impl Import<'_> {
+    /// A bad file must not cost the files around it. It is counted, and the import carries on.
+    /// Anything else, such as a database failure, still stops the import.
+    fn skip_bad_file(&mut self, result: Result<()>) -> Result<()> {
+        match result {
+            Err(e @ Error::Import(_)) => {
+                self.summary.files_skipped += 1;
+                self.first_skip.get_or_insert(e);
+                Ok(())
+            }
+            other => other,
+        }
+    }
+
     fn path(&mut self, path: &Path) -> Result<()> {
+        std::fs::metadata(path).map_err(|e| unreadable(path, e))?;
         if path.is_dir() {
             let mut entries = std::fs::read_dir(path)
                 .and_then(|dir| dir.collect::<std::io::Result<Vec<_>>>())
@@ -100,7 +134,8 @@ impl Import<'_> {
                 // file_type does not follow links, so a link back up the tree cannot loop.
                 let kind = entry.file_type().map_err(|e| unreadable(path, e))?;
                 if kind.is_dir() || kind.is_file() {
-                    self.path(&entry.path())?;
+                    let result = self.path(&entry.path());
+                    self.skip_bad_file(result)?;
                 }
             }
             return Ok(());
@@ -120,30 +155,33 @@ impl Import<'_> {
 
     fn zip(&mut self, path: &Path) -> Result<()> {
         let file = File::open(path).map_err(|e| unreadable(path, e))?;
-        let bad_zip = |e: zip::result::ZipError| {
-            Error::Import(format!(
-                "Rostery could not open {}: {e}. Download the zip from Spotify again and retry.",
-                path.display()
-            ))
-        };
-        let mut archive = zip::ZipArchive::new(file).map_err(bad_zip)?;
+        let mut archive = zip::ZipArchive::new(file).map_err(|e| bad_zip(path, e))?;
         for i in 0..archive.len() {
-            let mut entry = archive.by_index(i).map_err(bad_zip)?;
-            // A name that is not valid text cannot be a Spotify history file.
-            let Ok(name) = entry.name().map(|n| n.into_owned()) else {
-                continue;
-            };
-            if !entry.is_file() || extension(Path::new(&name)).as_deref() != Some("json") {
-                continue;
-            }
-            let label = format!("{}/{name}", path.display());
-            if let Some((format, bytes)) =
-                read_history(&mut entry).map_err(|e| unreadable(Path::new(&label), e))?
-            {
-                self.add(&label, format, &bytes)?;
-            }
+            let result = self.zip_entry(path, &mut archive, i);
+            self.skip_bad_file(result)?;
         }
         Ok(())
+    }
+
+    fn zip_entry(
+        &mut self,
+        path: &Path,
+        archive: &mut zip::ZipArchive<File>,
+        i: usize,
+    ) -> Result<()> {
+        let mut entry = archive.by_index(i).map_err(|e| bad_zip(path, e))?;
+        // A name that is not valid text cannot be a Spotify history file.
+        let Ok(name) = entry.name().map(|n| n.into_owned()) else {
+            return Ok(());
+        };
+        if !entry.is_file() || extension(Path::new(&name)).as_deref() != Some("json") {
+            return Ok(());
+        }
+        let label = format!("{}/{name}", path.display());
+        match read_history(&mut entry).map_err(|e| unreadable(Path::new(&label), e))? {
+            Some((format, bytes)) => self.add(&label, format, &bytes),
+            None => Ok(()),
+        }
     }
 
     /// One transaction per file.
@@ -151,21 +189,27 @@ impl Import<'_> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs() as i64);
-        let mut parsed = match format {
+        let parsed = match format {
             Format::SpotifyExtended => spotify_export::parse_extended(bytes, now),
             Format::SpotifyAccount => spotify_export::parse_account(bytes, now),
             // Task 3 replaces this arm.
             Format::TakeoutActivity => {
                 return Err(Error::Import(format!(
-                    "{label} is a Google Takeout file. Importing YouTube history is not available yet."
+                "{label} is a Google Takeout file. Importing YouTube history is not available yet."
+            )))
+            }
+        };
+        let mut parsed = match parsed {
+            Ok(parsed) => parsed,
+            // Valid JSON that is not a list of rows, such as a Wrapped summary, only looked like
+            // history. Sniffing is a substring match, so this is not a problem with the file.
+            Err(e) if e.is_data() => return Ok(()),
+            Err(e) => {
+                return Err(Error::Import(format!(
+                    "Rostery could not read {label}: {e}. Download the Export again from the Source and retry."
                 )))
             }
-        }
-        .map_err(|e| {
-            Error::Import(format!(
-                "Rostery could not read {label}: {e}. Download the Export again from the Source and retry."
-            ))
-        })?;
+        };
         // Account data has no private flag, so an extended private row also speaks for the
         // account copy of the same Play, stored already or later in this import.
         // ponytail: an account file imported on its own after the extended one still stores the
@@ -193,6 +237,13 @@ impl Import<'_> {
 
 fn extension(path: &Path) -> Option<String> {
     Some(path.extension()?.to_str()?.to_ascii_lowercase())
+}
+
+fn bad_zip(path: &Path, e: zip::result::ZipError) -> Error {
+    Error::Import(format!(
+        "Rostery could not open {}: {e}. Download the zip from Spotify again and retry.",
+        path.display()
+    ))
 }
 
 fn unreadable(path: &Path, e: impl std::fmt::Display) -> Error {
