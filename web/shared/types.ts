@@ -15,3 +15,12 @@ export interface Totals {
   spotify: SourceTotals;
   youtube: SourceTotals;
 }
+
+export interface ImportSummary {
+  filesRead: number;
+  added: number;
+  duplicates: number;
+  excludedPrivate: number;
+  excludedAds: number;
+  rejected: number;
+}

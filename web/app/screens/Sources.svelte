@@ -1,29 +1,89 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { clearDemo, loadDemo, totals as fetchTotals } from '../../shared/api';
+  import {
+    chooseExport,
+    clearDemo,
+    hasDemoData,
+    importPath,
+    loadDemo,
+    onFileDrop,
+    totals as fetchTotals,
+  } from '../../shared/api';
+  import { addSummaries, describeImport, noImport } from '../../shared/summary';
   import type { Totals } from '../../shared/types';
 
   const none = { plays: 0, minutes: 0, creators: 0, firstPlay: null, lastPlay: null };
 
   let totals = $state<Totals>({ spotify: none, youtube: none });
+  let hasDemo = $state(false);
   let loaded = $state(false);
   let busy = $state(false);
+  let importing = $state(false);
+  let dragging = $state(false);
+  let result = $state('');
   let error = $state('');
 
-  async function run(action: () => Promise<Totals>) {
+  // The Rust side sends its message as a string. Anything else is a real Error.
+  const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+  async function refresh() {
+    [totals, hasDemo] = await Promise.all([fetchTotals(), hasDemoData()]);
+    loaded = true;
+  }
+
+  /** Runs an action, then shows what is stored now, even when the action failed part way. */
+  async function run(action: () => Promise<unknown>) {
     busy = true;
     error = '';
     try {
-      totals = await action();
-      loaded = true;
+      await action();
     } catch (e) {
-      error = String(e);
-    } finally {
-      busy = false;
+      error = message(e);
+    }
+    try {
+      await refresh();
+    } catch (e) {
+      error ||= message(e);
+    }
+    busy = false;
+  }
+
+  async function importPaths(paths: string[]) {
+    result = '';
+    importing = true;
+    await run(async () => {
+      let sum = noImport;
+      for (const path of paths) sum = addSummaries(sum, await importPath(path));
+      result = describeImport(sum);
+    });
+    importing = false;
+  }
+
+  async function choose() {
+    try {
+      const picked = await chooseExport();
+      if (picked?.length) await importPaths(picked);
+    } catch (e) {
+      error = message(e);
     }
   }
 
-  onMount(() => run(fetchTotals));
+  onMount(() => {
+    refresh().catch((e) => (error = message(e)));
+    let unlisten: (() => void) | undefined;
+    let gone = false;
+    onFileDrop((event) => {
+      dragging = event.type === 'enter' || event.type === 'over';
+      if (event.type === 'drop' && !busy) importPaths(event.paths);
+    })
+      .then((stop) => (gone ? stop() : (unlisten = stop)))
+      // Outside the desktop app there is nothing to drop onto. Choose file still works.
+      .catch(() => {});
+    return () => {
+      gone = true;
+      unlisten?.();
+    };
+  });
 
   const all = $derived(totals.spotify.plays + totals.youtube.plays);
   // Each dial's arc is that Source's share of every Play stored.
@@ -97,9 +157,33 @@
     {/each}
   </div>
 
+  <div class="import" class:over={dragging}>
+    <div class="drop">
+      <h2>Add your Spotify history</h2>
+      <p>Drop the zip, a JSON file or a folder from Spotify here.</p>
+      <button class="primary" onclick={choose} disabled={busy}>Choose file</button>
+      {#if importing}
+        <p role="status">Reading your history. A big file takes a few seconds.</p>
+      {:else if result}
+        <p role="status" class="result">{result}</p>
+      {/if}
+    </div>
+    <div class="howto">
+      <h3>Where to get it</h3>
+      <ol>
+        <li>In Spotify, go to Account, Privacy settings, Download your data.</li>
+        <li>
+          Request <b>Extended streaming history</b>. It has your full lifetime of listening. The
+          regular Account data only covers about a year.
+        </li>
+        <li>Spotify emails a link when it is ready, which can take up to 30 days. Drop the zip here.</li>
+      </ol>
+    </div>
+  </div>
+
   <div class="actions">
     <button class="primary" onclick={() => run(loadDemo)} disabled={busy}>Try demo data</button>
-    {#if all > 0}
+    {#if hasDemo}
       <button onclick={() => run(clearDemo)} disabled={busy}>Clear demo data</button>
     {/if}
     {#if loaded && all === 0}
@@ -229,6 +313,79 @@
     font-variant-numeric: tabular-nums;
   }
 
+  .import {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 28px;
+    margin-top: 24px;
+    padding: 24px;
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    background: var(--panel);
+  }
+
+  /* The dashed edge marks a place to drop things; it turns brass while a file is over it. */
+  .drop {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 14px;
+    padding: 20px;
+    border: 1px dashed var(--faint);
+    border-radius: 6px;
+    transition:
+      border-color 0.15s,
+      background-color 0.15s;
+  }
+
+  .over .drop {
+    border-color: var(--brass);
+    background: color-mix(in srgb, var(--brass) 9%, transparent);
+  }
+
+  .drop h2 {
+    margin: 0;
+    color: var(--ivory);
+  }
+
+  .drop p {
+    margin: 0;
+    color: var(--dim);
+  }
+
+  .drop .result {
+    color: var(--ivory);
+  }
+
+  h3 {
+    margin: 0 0 10px;
+    font: 600 18px/1.2 var(--serif);
+  }
+
+  ol {
+    margin: 0;
+    padding-left: 22px;
+    color: var(--dim);
+  }
+
+  li {
+    padding-left: 4px;
+  }
+
+  li + li {
+    margin-top: 8px;
+  }
+
+  li::marker {
+    color: var(--brass);
+    font-variant-numeric: tabular-nums;
+  }
+
+  b {
+    color: var(--ivory);
+    font-weight: 600;
+  }
+
   .actions {
     display: flex;
     flex-wrap: wrap;
@@ -272,7 +429,8 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .arc {
+    .arc,
+    .drop {
       transition: none;
     }
   }

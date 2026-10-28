@@ -4,11 +4,11 @@
 
 **Blocked by:** 01
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A zip, a JSON file or a folder all import
-- [ ] Private sessions are left out and the summary says how many
-- [ ] IP addresses and usernames in the file never reach the database
-- [ ] Importing the same data twice, or both formats of it, does not double count
-- [ ] A file Rostery does not recognise gets a message saying which Exports it accepts
-- [ ] 300,000 Plays import in under 30 seconds in a release build
+- [x] A zip, a JSON file or a folder all import
+- [x] Private sessions are left out and the summary says how many
+- [x] IP addresses and usernames in the file never reach the database
+- [x] Importing the same data twice, or both formats of it, does not double count
+- [x] A file Rostery does not recognise gets a message saying which Exports it accepts
+- [x] 300,000 Plays import in under 30 seconds in a release build
