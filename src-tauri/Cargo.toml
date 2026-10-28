@@ -8,6 +8,7 @@ default-run = "rostery-app"
 [dependencies]
 rostery-core = { version = "0.1.0", path = "../crates/core" }
 tauri = { version = "2.12.5", features = [] }
+tauri-plugin-dialog = "2.8.4"
 
 [build-dependencies]
 tauri-build = { version = "2.7.4", features = [] }
