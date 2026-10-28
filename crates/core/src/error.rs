@@ -9,6 +9,9 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("Rostery found saved data it could not read: {0}. Reset that setting and try again.")]
     Json(#[from] serde_json::Error),
+    /// A file the user picked. The message already says what to do next.
+    #[error("{0}")]
+    Import(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

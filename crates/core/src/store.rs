@@ -88,16 +88,23 @@ impl Store {
         Ok(Store { conn })
     }
 
-    /// One transaction. A Play that is already stored (same dedupe key) counts as a duplicate.
+    /// One transaction. A Play that is already stored (same dedupe key) counts as a duplicate,
+    /// except that an Export Play takes over an API Play it repeats, so an Export import
+    /// never loses the Play to the API copy it is about to replace.
     pub fn insert_plays(&mut self, plays: &[Play]) -> Result<InsertCount> {
         let tx = self.conn.transaction()?;
         let mut added = 0;
         {
             let mut stmt = tx.prepare(
-                "INSERT OR IGNORE INTO plays
+                "INSERT INTO plays
                  (source, origin, played_at, duration_ms, creator, creator_ref,
                   item, item_ref, skipped, dedupe_key)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 ON CONFLICT (dedupe_key) DO UPDATE SET
+                    origin = excluded.origin, played_at = excluded.played_at,
+                    duration_ms = excluded.duration_ms, creator_ref = excluded.creator_ref,
+                    item_ref = excluded.item_ref, skipped = excluded.skipped
+                 WHERE plays.origin = 'api' AND excluded.origin = 'export'",
             )?;
             for p in plays {
                 added += stmt.execute(params![
@@ -173,6 +180,14 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// After an Export import: API Plays at or before the Export's newest Play are in the Export now.
+    pub fn replace_api_plays_before(&mut self, source: Source, ts: i64) -> Result<u64> {
+        Ok(self.conn.execute(
+            "DELETE FROM plays WHERE source = ?1 AND origin = 'api' AND played_at <= ?2",
+            params![source.as_str(), ts],
+        )? as u64)
     }
 
     pub fn delete_origin(&mut self, source: Source, origin: Origin) -> Result<u64> {
@@ -310,6 +325,59 @@ mod tests {
         let left = store.plays(None).unwrap();
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].origin, Origin::Export);
+    }
+
+    #[test]
+    fn replace_api_plays_before_is_inclusive_and_scoped() {
+        let mut store = Store::open_in_memory().unwrap();
+        let with = |source, origin, creator: &str, at| Play {
+            origin,
+            ..play(source, creator, "Song", at)
+        };
+        store
+            .insert_plays(&[
+                with(Source::Spotify, Origin::Api, "before", 100),
+                with(Source::Spotify, Origin::Api, "at", 200),
+                with(Source::Spotify, Origin::Api, "after", 300),
+                with(Source::Spotify, Origin::Export, "export", 100),
+                with(Source::Youtube, Origin::Api, "other source", 100),
+            ])
+            .unwrap();
+        assert_eq!(
+            store
+                .replace_api_plays_before(Source::Spotify, 200)
+                .unwrap(),
+            2
+        );
+        let mut left: Vec<String> = store
+            .plays(None)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.creator)
+            .collect();
+        left.sort();
+        assert_eq!(left, ["after", "export", "other source"]);
+    }
+
+    #[test]
+    fn export_play_takes_over_the_api_play_it_repeats() {
+        let mut store = Store::open_in_memory().unwrap();
+        let with = |origin, at| Play {
+            origin,
+            ..play(Source::Spotify, "Moth Season", "Soft Static", at)
+        };
+        store.insert_plays(&[with(Origin::Api, 1000)]).unwrap();
+        let count = store.insert_plays(&[with(Origin::Export, 1010)]).unwrap();
+        assert_eq!((count.added, count.duplicates), (1, 0));
+        // A second Export copy is just a duplicate.
+        let again = store.insert_plays(&[with(Origin::Export, 1015)]).unwrap();
+        assert_eq!((again.added, again.duplicates), (0, 1));
+        let plays = store.plays(None).unwrap();
+        assert_eq!(plays.len(), 1);
+        assert_eq!(
+            (plays[0].origin, plays[0].played_at),
+            (Origin::Export, 1010)
+        );
     }
 
     #[test]

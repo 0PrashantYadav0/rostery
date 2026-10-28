@@ -3,6 +3,7 @@
 
 pub mod demo;
 pub mod error;
+pub mod ingest;
 pub mod model;
 pub mod store;
 
