@@ -2,7 +2,7 @@
 //! the person's language gives them. Titles are translated too, so a watch is told by its link
 //! wherever that can decide. The row struct names only the fields Rostery keeps.
 
-use super::{each_row, played_at, Parsed};
+use super::{each_row, looks_like_id, played_at, Parsed};
 use crate::model::{Origin, Play, Source};
 use serde::Deserialize;
 
@@ -97,7 +97,7 @@ fn watch(
         return None;
     }
     let channel = subtitles.into_iter().flatten().next();
-    let (name, creator_ref) = channel.map_or((None, None), |c| (c.name, c.url));
+    let (name, url) = channel.map_or((None, None), |c| (c.name, c.url));
     let name = name.unwrap_or_default();
     Some(Play {
         source: Source::Youtube,
@@ -106,34 +106,39 @@ fn watch(
         duration_ms: None,
         // YouTube Music's auto-made channels are all named "<artist> - Topic".
         creator: name.strip_suffix(" - Topic").unwrap_or(&name).to_owned(),
-        creator_ref,
+        creator_ref: url.as_deref().and_then(channel_ref),
         item: item.to_owned(),
         item_ref,
         skipped: false,
     })
 }
 
-/// The video a YouTube link plays, from `watch?v=ID` or `shorts/ID`. A link is untrusted and the ID
-/// goes on to build URLs, so it has to look like an ID.
+/// The video a YouTube link plays, from `watch?v=ID` or `shorts/ID`.
 fn video_id(url: &str) -> Option<&str> {
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))?;
-    let (host, path) = rest.split_once('/')?;
-    if !matches!(
-        host,
-        "www.youtube.com" | "youtube.com" | "m.youtube.com" | "music.youtube.com"
-    ) {
-        return None;
-    }
-    let path = path.split('#').next()?;
+    let path = youtube_path(url)?.split('#').next()?;
     let id = match path.strip_prefix("watch?") {
         Some(query) => query.split('&').find_map(|pair| pair.strip_prefix("v="))?,
         None => path.strip_prefix("shorts/")?.split(['?', '/']).next()?,
     };
-    let looks_right = !id.is_empty()
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'));
-    looks_right.then_some(id)
+    looks_like_id(id).then_some(id)
+}
+
+/// The channel a YouTube link names, in one form. Only the ID comes from the file, so what is
+/// stored is safe to use as a link.
+fn channel_ref(url: &str) -> Option<String> {
+    let id = youtube_path(url)?.strip_prefix("channel/")?;
+    looks_like_id(id).then(|| format!("https://www.youtube.com/channel/{id}"))
+}
+
+/// What follows the host of a link to YouTube itself.
+fn youtube_path(url: &str) -> Option<&str> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let (host, path) = rest.split_once('/')?;
+    matches!(
+        host,
+        "www.youtube.com" | "youtube.com" | "m.youtube.com" | "music.youtube.com"
+    )
+    .then_some(path)
 }

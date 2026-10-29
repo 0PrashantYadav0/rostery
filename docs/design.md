@@ -71,7 +71,7 @@ There are two frontend builds from one package. `dist/app` is loaded by the desk
 
 | Boundary | Rule |
 |---|---|
-| Export files and API responses | Untrusted. Parsers only read the fields they need, so IPs, usernames and user agents in a Spotify file never reach memory or disk. |
+| Export files and API responses | Untrusted. Parsers only read the fields they need, so IPs, usernames and user agents in a Spotify file never reach memory or disk. An ID or link from a file is stored only if it has the shape of one. |
 | Text inside history | Untrusted. It is stripped of control characters and cut to 120 characters before it enters a Digest, and the prompt marks it as data. |
 | Provider output | Untrusted. It is parsed as JSON, validated, and rendered as text. Never as HTML. |
 | The Share Site | Public. It is built from one typed struct, `SharePayload`, so anything not in that struct cannot reach the site. |

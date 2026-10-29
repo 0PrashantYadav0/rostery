@@ -25,6 +25,8 @@ const HTML_SNIFF_BYTES: u64 = 1 << 20;
 /// A file value decides which API Plays get deleted, so a Play from the future is never believed.
 /// A day of slack covers a computer whose clock runs a little behind.
 const CLOCK_SLACK: i64 = 86_400;
+/// Longer than any real ID. A video's has 11 characters, a Spotify Item's 22 and a channel's 24.
+const MAX_ID_BYTES: usize = 64;
 /// How to get history out of Takeout in the one format Rostery reads.
 const TAKEOUT_STEPS: &str = "go to takeout.google.com, tick YouTube and YouTube Music, click \
      Multiple formats and set history to JSON";
@@ -335,6 +337,14 @@ fn is_takeout_html(reader: impl Read, label: &str) -> Result<bool> {
         .read_to_end(&mut head)
         .map_err(|e| unreadable(label, e))?;
     Ok(contains(&head, "youtube.com/watch") || contains(&head, "youtube.com/shorts"))
+}
+
+/// An ID from a file goes on to build URLs, and a file is untrusted, so it has to look like an ID.
+fn looks_like_id(id: &str) -> bool {
+    (1..=MAX_ID_BYTES).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
 }
 
 /// What one history file holds, whichever Source wrote it.

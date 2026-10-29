@@ -138,6 +138,53 @@ fn watch_entry_maps_fields() {
 }
 
 #[test]
+fn only_a_youtube_channel_link_becomes_a_creator_ref() {
+    let too_long = format!("https://www.youtube.com/channel/{}", "a".repeat(65));
+    let huge = "x".repeat(1 << 20);
+    for url in [
+        "javascript:alert(document.domain)",
+        "https://phish.example/login",
+        "https://phish.example/www.youtube.com/channel/UCnightowlradio",
+        "https://www.youtube.com.phish.example/channel/UCnightowlradio",
+        "https://www.youtube.com/channel/",
+        "https://www.youtube.com/channel/UCnightowlradio/community",
+        "https://www.youtube.com/channel/\"><script>",
+        "https://www.youtube.com/@nightowlradio",
+        &too_long,
+        &huge,
+    ] {
+        let mut forged = watch("Low Tide", TIME);
+        forged["subtitles"][0]["url"] = json!(url);
+        let (store, summary) = import_rows(json!([forged]));
+        let shown = &url[..url.len().min(70)];
+        assert_eq!((summary.added, summary.rejected), (1, 0), "{shown}");
+        let play = &store.plays(None).unwrap()[0];
+        assert_eq!(play.creator_ref, None, "{shown}");
+        // A bad link costs the link, not the Creator.
+        assert_eq!(play.creator, "Night Owl Radio", "{shown}");
+    }
+}
+
+#[test]
+fn a_channel_link_is_stored_in_one_form() {
+    for url in [
+        CHANNEL_URL,
+        "http://youtube.com/channel/UCnightowlradio",
+        "https://m.youtube.com/channel/UCnightowlradio",
+        "https://music.youtube.com/channel/UCnightowlradio",
+    ] {
+        let mut good = watch("Low Tide", TIME);
+        good["subtitles"][0]["url"] = json!(url);
+        let (store, _) = import_rows(json!([good]));
+        assert_eq!(
+            store.plays(None).unwrap()[0].creator_ref.as_deref(),
+            Some(CHANNEL_URL),
+            "{url}"
+        );
+    }
+}
+
+#[test]
 fn ads_are_excluded() {
     let mut ad = row(
         "Watched Buy More Socks",
@@ -274,6 +321,16 @@ fn non_watch_activity_is_skipped() {
         row(
             "Watched forged",
             "https://www.youtube.com/watch?v=\"><script>",
+            TIME
+        ),
+        row(
+            "Watched forged",
+            &format!("https://www.youtube.com/watch?v={}", "a".repeat(65)),
+            TIME
+        ),
+        row(
+            "Watched forged",
+            &format!("https://www.youtube.com/shorts/{}", "a".repeat(65)),
             TIME
         ),
         row(

@@ -163,6 +163,26 @@ fn podcasts_use_show_as_creator() {
 }
 
 #[test]
+fn a_forged_uri_costs_the_ref_and_not_the_play() {
+    let too_long = format!("spotify:track:{}", "a".repeat(65));
+    for uri in [
+        "javascript:alert(document.domain)",
+        "https://phish.example/login",
+        "spotify:track:",
+        "spotify:track:../../phish",
+        "spotify:artist:4uLU6hMCjMI75M1A2tKUQC",
+        "spotify:local:Some+Band:::Low+Tide:200",
+        &too_long,
+    ] {
+        let mut forged = extended("2024-03-01T13:05:00Z", "Moth Season", "Low Tide", 200_000);
+        forged["spotify_track_uri"] = json!(uri);
+        let (store, summary) = import_rows(json!([forged]));
+        assert_eq!((summary.added, summary.rejected), (1, 0), "{uri}");
+        assert_eq!(store.plays(None).unwrap()[0].item_ref, None, "{uri}");
+    }
+}
+
+#[test]
 fn short_plays_flagged_skipped() {
     let mut flagged = extended(
         "2024-03-01T13:07:00Z",

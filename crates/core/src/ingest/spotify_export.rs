@@ -1,7 +1,7 @@
 //! Spotify's two history formats. The row structs name only the fields Rostery keeps, so the
 //! rest of a row (IP address, username, device) is skipped by the parser and never held.
 
-use super::{each_row, played_at, Parsed};
+use super::{each_row, looks_like_id, played_at, Parsed};
 use crate::model::{Origin, Play, Source};
 use serde::Deserialize;
 
@@ -47,7 +47,9 @@ pub fn parse_extended(bytes: &[u8], now: i64) -> serde_json::Result<Parsed> {
             r.ts.as_deref(),
             r.master_metadata_album_artist_name.or(r.episode_show_name),
             r.master_metadata_track_name.or(r.episode_name),
-            r.spotify_track_uri.or(r.spotify_episode_uri),
+            r.spotify_track_uri
+                .or(r.spotify_episode_uri)
+                .filter(|uri| is_item_uri(uri)),
             r.ms_played,
             r.skipped == Some(true),
             now,
@@ -73,6 +75,14 @@ pub fn parse_account(bytes: &[u8], now: i64) -> serde_json::Result<Parsed> {
             now,
         ));
     })
+}
+
+/// A track or an episode, the only URIs with a page to link to. Anything else costs the Play its
+/// `item_ref` and nothing more.
+fn is_item_uri(uri: &str) -> bool {
+    uri.strip_prefix("spotify:track:")
+        .or_else(|| uri.strip_prefix("spotify:episode:"))
+        .is_some_and(looks_like_id)
 }
 
 /// A Play needs a believable time, a Creator and an Item, and any duration it has must be in
