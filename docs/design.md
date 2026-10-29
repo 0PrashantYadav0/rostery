@@ -109,17 +109,21 @@ Two rules keep Origins consistent. When an Export is imported and every file in 
 
 Private sessions (`incognito_mode: true`) and Google ads (`details` holding "From Google Ads") are dropped at ingest and counted in the import summary. Spotify's account format has no private flag, so an extended private row also removes the account copy of that Play, whether it is already stored or comes later in the same import. An account file imported on its own after the extended one cannot be caught, because remembering private Plays would mean writing them to disk. A YouTube video that has since been deleted has no `subtitles`, and a removed one has no link either. It is kept with an empty Creator because it makes a good joke, and it never becomes a Planet. A Takeout row is a Play only when it links to a watch or Shorts video, or to nothing. Searches, subscriptions, likes, community posts and other Google products in the same file are ignored without counting as rejected.
 
+Clearing demo data removes demo Plays, demo Interests and demo Affinities in one transaction. Affinities have no Origin column, so a demo one has the kind `demo`.
+
 ## Universe
 
 `universe::build` is a pure function of Plays, Affinities, Interests and a filter (`spotify`, `youtube`, `both`).
 
-**Weight.** Minutes played, plus Affinity score. Takeout has no durations, so each YouTube watch counts as 8 minutes.
+**Weight.** Minutes played, plus Affinity score. Takeout has no durations, so each YouTube watch counts as 8 minutes. A skipped Play (Spotify under 30 seconds) still adds its minutes, but it does not count as a Play on the Planet, among the Planet's top Items, or toward shared Sessions, since a skip does not show interest. It does keep a Session going, because a Session is a run of Plays.
 
-**Radius.** `0.6 + 3.4 * sqrt(weight / max_weight)`, where `max_weight` is the largest in that Planet's own Source. A Spotify-heavy user's channels still get sensible sizes in the combined view. At most 150 Planets are kept, heaviest first.
+**Radius.** `0.6 + 3.4 * sqrt(weight / max_weight)`, where `max_weight` is the largest in that Planet's own Source. A Spotify-heavy user's channels still get sensible sizes in the combined view. At most 150 Planets are kept, heaviest first. Weight is compared as a share of `max_weight` here too, so that view cannot cut every channel for a person whose artists all outweigh them.
 
-**Links.** Group Plays into Sessions at a 30 minute gap. For two Creators with at least 2 shared Sessions, compute normalised pointwise mutual information, `npmi = ln(c_ab * S / (c_a * c_b)) / -ln(c_ab / S)`, floored at 0. Take the Jaccard similarity of their Interest sets. `strength = 0.6 * npmi + 0.4 * jaccard`. Keep a Link at `strength >= 0.12`, and keep it only if it is in the top 6 for at least one of its two Planets. Sessions are capped at 50 distinct Creators so a week of autoplay cannot form a giant clique.
+**Links.** Group Plays into Sessions at a 30 minute gap. For two Creators with at least 2 shared Sessions, compute normalised pointwise mutual information, `npmi = ln(c_ab * S / (c_a * c_b)) / -ln(c_ab / S)`, floored at 0. Take the Jaccard similarity of their Interest sets. `strength = 0.6 * npmi + 0.4 * jaccard`. Keep a Link at `strength >= 0.12`, and keep it only if it is in the top 6 for at least one of its two Planets. Sessions are capped at 50 distinct Creators so a week of autoplay cannot form a giant clique. Sessions and the count `S` only use Plays in view, so two Sources can share a Session only in the combined view. For two Creators who are in every Session the formula is 0 / 0, and `npmi` is 1.
 
 **Galaxies.** Deterministic weighted label propagation, with Planets visited heaviest first and ties going to the lowest label, for at most 20 rounds. Galaxy names default to the most common Interest, or else the heaviest member, and a Roast can replace them.
+
+**Way back to the Source.** A Planet and its top Items link to the Source. These links are rebuilt from an ID checked for shape, because the text came from an untrusted file, so they can only be `https` links to `open.spotify.com` or `www.youtube.com`. A Spotify Export names no artist ID, so without one a Spotify Planet links to a search for its name. A YouTube Planet with no channel link has no link.
 
 **Layout.** Computed in Rust so the app and site show the same picture and the result is testable. Galaxy centres go on a Fibonacci sphere. A seeded force simulation runs for 300 steps, then a final pass pushes apart any overlapping Planets. The same input always gives identical output.
 

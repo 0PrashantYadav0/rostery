@@ -15,16 +15,18 @@ struct Side {
     creators: [&'static str; 6],
 }
 
-/// A taste group: its Creators on each Source, plus one tag both Sources share.
+/// A taste group: its Creators on each Source, plus two tags both Sources share. Two, because
+/// sharing one of five Interests is too weak to make a Link, and the combined Universe should show
+/// a channel linked to an artist it never shared a Session with.
 struct Group {
-    shared: &'static str,
+    shared: [&'static str; 2],
     spotify: Side,
     youtube: Side,
 }
 
 const GROUPS: [Group; 5] = [
     Group {
-        shared: "dreamy",
+        shared: ["dreamy", "headphones"],
         spotify: Side {
             tags: ["dream pop", "shoegaze"],
             creators: [
@@ -49,7 +51,7 @@ const GROUPS: [Group; 5] = [
         },
     },
     Group {
-        shared: "tinkering",
+        shared: ["tinkering", "weekend projects"],
         spotify: Side {
             tags: ["chiptune", "synthwave"],
             creators: [
@@ -74,7 +76,7 @@ const GROUPS: [Group; 5] = [
         },
     },
     Group {
-        shared: "family",
+        shared: ["family", "bedtime"],
         spotify: Side {
             tags: ["kids music", "singalong"],
             creators: [
@@ -99,7 +101,7 @@ const GROUPS: [Group; 5] = [
         },
     },
     Group {
-        shared: "heavy",
+        shared: ["heavy", "loud"],
         spotify: Side {
             tags: ["metal", "hard rock"],
             creators: [
@@ -124,7 +126,7 @@ const GROUPS: [Group; 5] = [
         },
     },
     Group {
-        shared: "unwinding",
+        shared: ["unwinding", "slow evenings"],
         spotify: Side {
             tags: ["jazz", "lounge"],
             creators: [
@@ -180,10 +182,11 @@ const ITEMS_PER_CREATOR: usize = 4;
 const DEMO_SEED: u64 = 2024;
 
 /// A small linear congruential generator, so the same seed always gives the same demo.
-struct Lcg(u64);
+pub(crate) struct Lcg(pub(crate) u64);
 
 impl Lcg {
-    fn next(&mut self) -> u64 {
+    /// 31 random bits.
+    pub(crate) fn next(&mut self) -> u64 {
         self.0 = self
             .0
             .wrapping_mul(6_364_136_223_846_793_005)
@@ -272,7 +275,7 @@ pub fn generate(seed: u64, now: i64) -> DemoData {
         for group in &GROUPS {
             let s = side(group, source);
             for creator in s.creators {
-                let tags = [s.tags[0], s.tags[1], group.shared];
+                let tags = [s.tags[0], s.tags[1], group.shared[0], group.shared[1]];
                 interests.push((source, creator.to_string(), tags.map(String::from).to_vec()));
             }
         }
@@ -393,7 +396,7 @@ mod tests {
         assert_eq!(interests.len(), 60);
         assert_eq!(
             interests[&(Source::Spotify, "Moth Season".to_string())],
-            ["dream pop", "dreamy", "shoegaze"]
+            ["dream pop", "dreamy", "headphones", "shoegaze"]
         );
     }
 

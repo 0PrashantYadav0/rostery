@@ -346,7 +346,7 @@ fn is_takeout_html(reader: impl Read, label: &str) -> Result<bool> {
 }
 
 /// An ID from a file goes on to build URLs, and a file is untrusted, so it has to look like an ID.
-fn looks_like_id(id: &str) -> bool {
+pub(crate) fn looks_like_id(id: &str) -> bool {
     (1..=MAX_ID_BYTES).contains(&id.len())
         && id
             .bytes()
