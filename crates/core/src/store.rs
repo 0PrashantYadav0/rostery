@@ -207,11 +207,18 @@ impl Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
-    /// After an Export import: API Plays at or before the Export's newest Play are in the Export now.
-    pub fn replace_api_plays_before(&mut self, source: Source, ts: i64) -> Result<u64> {
+    /// After an Export import: API Plays from the import's oldest Play to its newest, inclusive,
+    /// are in the Export now. Outside that span an API Play may be held nowhere else, so it stays.
+    pub fn replace_api_plays_in_span(
+        &mut self,
+        source: Source,
+        oldest: i64,
+        newest: i64,
+    ) -> Result<u64> {
         Ok(self.conn.execute(
-            "DELETE FROM plays WHERE source = ?1 AND origin = 'api' AND played_at <= ?2",
-            params![source.as_str(), ts],
+            "DELETE FROM plays
+             WHERE source = ?1 AND origin = 'api' AND played_at BETWEEN ?2 AND ?3",
+            params![source.as_str(), oldest, newest],
         )? as u64)
     }
 
@@ -397,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn replace_api_plays_before_is_inclusive_and_scoped() {
+    fn replace_api_plays_in_span_is_inclusive_and_scoped() {
         let mut store = Store::open_in_memory().unwrap();
         let with = |source, origin, creator: &str, at| Play {
             origin,
@@ -406,17 +413,19 @@ mod tests {
         store
             .insert_plays(&[
                 with(Source::Spotify, Origin::Api, "before", 100),
-                with(Source::Spotify, Origin::Api, "at", 200),
-                with(Source::Spotify, Origin::Api, "after", 300),
-                with(Source::Spotify, Origin::Export, "export", 100),
-                with(Source::Youtube, Origin::Api, "other source", 100),
+                with(Source::Spotify, Origin::Api, "at oldest", 200),
+                with(Source::Spotify, Origin::Api, "inside", 250),
+                with(Source::Spotify, Origin::Api, "at newest", 300),
+                with(Source::Spotify, Origin::Api, "after", 400),
+                with(Source::Spotify, Origin::Export, "export", 250),
+                with(Source::Youtube, Origin::Api, "other source", 250),
             ])
             .unwrap();
         assert_eq!(
             store
-                .replace_api_plays_before(Source::Spotify, 200)
+                .replace_api_plays_in_span(Source::Spotify, 200, 300)
                 .unwrap(),
-            2
+            3
         );
         let mut left: Vec<String> = store
             .plays(None)
@@ -425,7 +434,7 @@ mod tests {
             .map(|p| p.creator)
             .collect();
         left.sort();
-        assert_eq!(left, ["after", "export", "other source"]);
+        assert_eq!(left, ["after", "before", "export", "other source"]);
     }
 
     #[test]

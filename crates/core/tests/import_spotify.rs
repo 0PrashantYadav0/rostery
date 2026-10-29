@@ -675,15 +675,23 @@ fn when_nothing_could_be_read_the_first_problem_is_the_error() {
 fn a_skipped_file_keeps_api_plays_it_might_have_held() {
     let dir = TempDir::new().unwrap();
     std::fs::write(dir.path().join("broken.json"), br#"[{"ms_played": 5"#).unwrap();
-    std::fs::write(dir.path().join("history.json"), history_bytes()).unwrap();
+    write_json(
+        dir.path(),
+        "history.json",
+        &json!([
+            extended("2024-03-01T13:05:00Z", "A", "T", 200_000),
+            extended("2024-03-01T15:05:00Z", "A", "U", 200_000),
+        ]),
+    );
     let mut store = Store::open_in_memory().unwrap();
     store
         .insert_plays(&[Play {
             source: Source::Spotify,
             origin: Origin::Api,
-            played_at: MINUTE - 3600,
+            // Inside the span, so only the skipped file saves it.
+            played_at: MINUTE + 3600,
             duration_ms: None,
-            creator: "Older Api Band".into(),
+            creator: "Api Band".into(),
             creator_ref: None,
             item: "Song".into(),
             item_ref: None,
@@ -691,7 +699,7 @@ fn a_skipped_file_keeps_api_plays_it_might_have_held() {
         }])
         .unwrap();
     import_path(&mut store, dir.path()).unwrap();
-    assert_eq!(store.plays(None).unwrap().len(), 2);
+    assert_eq!(store.plays(None).unwrap().len(), 3);
 }
 
 #[test]
@@ -762,20 +770,31 @@ fn export_replaces_overlapping_api_plays() {
     store
         .insert_plays(&[
             api(MINUTE - 3600, "Older Api Band"),
-            api(MINUTE + 3600, "Newer Api Band"),
+            api(MINUTE + 3600, "Inside Api Band"),
+            api(MINUTE + 3 * 3600, "Newer Api Band"),
         ])
         .unwrap();
 
+    // Two Plays two hours apart. An Account file spans about a year, so what is older than the
+    // Export's oldest Play may be held nowhere else.
     let dir = TempDir::new().unwrap();
     let file = write_json(
         dir.path(),
         "Streaming_History_Audio_2024_0.json",
-        &json!([extended(
-            "2024-03-01T13:05:00Z",
-            "The Paper Lanterns",
-            "Low Tide",
-            200_000
-        )]),
+        &json!([
+            extended(
+                "2024-03-01T13:05:00Z",
+                "The Paper Lanterns",
+                "Low Tide",
+                200_000
+            ),
+            extended(
+                "2024-03-01T15:05:00Z",
+                "The Paper Lanterns",
+                "Soft Static",
+                200_000
+            ),
+        ]),
     );
     import_path(&mut store, &file).unwrap();
 
@@ -788,6 +807,8 @@ fn export_replaces_overlapping_api_plays() {
     assert_eq!(
         left,
         [
+            ("Older Api Band".to_string(), Origin::Api),
+            ("The Paper Lanterns".to_string(), Origin::Export),
             ("The Paper Lanterns".to_string(), Origin::Export),
             ("Newer Api Band".to_string(), Origin::Api),
         ]

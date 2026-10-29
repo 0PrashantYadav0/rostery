@@ -7,7 +7,7 @@ use crate::error::{Error, Result};
 use crate::model::Source;
 use crate::store::{dedupe_key, Store};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -63,7 +63,7 @@ pub fn import_paths(store: &mut Store, paths: &[impl AsRef<Path>]) -> Result<Imp
     let mut run = Import {
         store,
         summary: ImportSummary::default(),
-        newest_spotify: None,
+        spans: HashMap::new(),
         private: HashSet::new(),
         removed_private: 0,
         first_skip: None,
@@ -87,10 +87,14 @@ pub fn import_paths(store: &mut Store, paths: &[impl AsRef<Path>]) -> Result<Imp
             )
         }));
     }
-    // The Export now holds every API Play up to its newest, so those copies can go. With a file
-    // left unread that is not certain, and an API Play cannot be fetched again.
-    if let (Some(ts), 0) = (run.newest_spotify, run.summary.files_skipped) {
-        run.store.replace_api_plays_before(Source::Spotify, ts)?;
+    // Inside its own span an Export holds what the API saw, so those copies can go. Outside it an
+    // API Play may be held nowhere else. With a file left unread even the span is not certain, and
+    // an API Play cannot be fetched again.
+    if run.summary.files_skipped == 0 {
+        for (&source, &(oldest, newest)) in &run.spans {
+            run.store
+                .replace_api_plays_in_span(source, oldest, newest)?;
+        }
     }
     // Net of what private rows took back out, so `added` matches what the dials gain.
     run.summary.added = run.summary.added.saturating_sub(run.removed_private);
@@ -100,7 +104,8 @@ pub fn import_paths(store: &mut Store, paths: &[impl AsRef<Path>]) -> Result<Imp
 struct Import<'a> {
     store: &'a mut Store,
     summary: ImportSummary,
-    newest_spotify: Option<i64>,
+    /// Each Source's oldest and newest Play in this import.
+    spans: HashMap<Source, (i64, i64)>,
     /// Dedupe keys of the private rows seen so far in this import.
     private: HashSet<String>,
     /// Stored Plays taken back out because a private row named them.
@@ -222,8 +227,11 @@ impl Import<'_> {
                 .plays
                 .retain(|p| !self.private.contains(&dedupe_key(p)));
         }
-        let newest = parsed.plays.iter().map(|p| p.played_at).max();
-        self.newest_spotify = self.newest_spotify.max(newest);
+        for p in &parsed.plays {
+            let t = p.played_at;
+            let span = self.spans.entry(p.source).or_insert((t, t));
+            *span = (span.0.min(t), span.1.max(t));
+        }
         let count = self.store.insert_plays(&parsed.plays)?;
         let s = &mut self.summary;
         s.files_read += 1;
