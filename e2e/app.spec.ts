@@ -80,6 +80,7 @@ test('import summary appears', async ({ page }) => {
     excludedPrivate: 12,
     excludedAds: 0,
     rejected: 0,
+    skippedReason: null,
   };
   await installMockIpc(page, {
     totals: () => stored,
@@ -97,7 +98,7 @@ test('import summary appears', async ({ page }) => {
   });
 
   await page.goto('/');
-  await expect(page.getByText('Where to get it')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Get your Spotify Export' })).toBeVisible();
   await page.getByRole('button', { name: 'Choose file' }).click();
 
   await expect(page.getByRole('status')).toHaveText('Added 41,203 Plays. Skipped 12 private sessions.');
@@ -130,6 +131,7 @@ const nothing: ImportSummary = {
   excludedPrivate: 0,
   excludedAds: 0,
   rejected: 0,
+  skippedReason: null,
 };
 const empty = { totals: () => ({ spotify: none, youtube: none }), has_demo_data: () => false };
 
@@ -282,5 +284,153 @@ test('dragging a file brings the drop zone on screen in a small window', async (
   await page.goto('/');
   await dragFile(page);
 
-  await expect(page.getByRole('heading', { name: 'Add your Spotify history' })).toBeInViewport();
+  await expect(page.getByRole('heading', { name: 'Add your history' })).toBeInViewport();
+});
+
+const htmlMessage =
+  'Rostery cannot read /d/watch-history.html. It is a Google Takeout in HTML, which is what Takeout gives you for ' +
+  'history unless you change it. To get JSON, go to takeout.google.com, tick YouTube and YouTube Music, click ' +
+  'Multiple formats and set history to JSON, then create the Export again. Google emails you a link when it is ready.';
+
+test('html file shows json guidance', async ({ page }) => {
+  const dialogs: any[] = [];
+  await installMockIpc(page, {
+    ...empty,
+    'plugin:dialog|open': (args) => {
+      dialogs.push(args.options);
+      return ['/d/watch-history.html'];
+    },
+    import_paths: () => {
+      throw new Error(htmlMessage);
+    },
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Choose file' }).click();
+
+  await expect(page.getByRole('alert')).toHaveText(htmlMessage);
+  // The picker has to offer an HTML file, or this message could only be reached by dropping one.
+  expect(dialogs[0].filters[0].extensions).toContain('html');
+});
+
+test('an html file beside a good one still explains json', async ({ page }) => {
+  await installMockIpc(page, {
+    ...empty,
+    'plugin:dialog|open': () => ['/d/takeout'],
+    import_paths: () => ({ ...nothing, filesRead: 1, filesSkipped: 1, added: 7, skippedReason: htmlMessage }),
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Choose file' }).click();
+
+  await expect(page.getByRole('status')).toHaveText(
+    `Added 7 Plays. Left out 1 file Rostery could not read. ${htmlMessage}`,
+  );
+});
+
+test('the how-to gives the steps for both Exports', async ({ page }) => {
+  await installMockIpc(page, empty);
+
+  await page.goto('/');
+
+  await expect(page.getByRole('heading', { name: 'Add your history' })).toBeVisible();
+  const spotify = page.locator('.howto.spotify');
+  await expect(spotify).toContainText('Download your data');
+  await expect(spotify).toContainText('Extended streaming history');
+
+  const youtube = page.locator('.howto.youtube');
+  await expect(youtube.getByRole('heading', { name: 'Get your YouTube Export' })).toBeVisible();
+  await expect(youtube).toContainText('takeout.google.com');
+  // HTML is what Takeout gives unless the person changes it, and that is the step people miss.
+  await expect(youtube).toContainText('Takeout gives you history as HTML unless you change it');
+  await expect(youtube).toContainText('Multiple formats');
+  await expect(youtube).toContainText('JSON');
+  await expect(youtube).toContainText('Google emails you a link');
+  await expect(youtube).toContainText('YouTube does not let apps read your watch history');
+});
+
+test('a long path in an error wraps inside its box', async ({ page }) => {
+  const path = `/Users/someone/${'very_long_folder_name_with_no_spaces_'.repeat(12)}/watch-history.html`;
+  await installMockIpc(page, {
+    ...empty,
+    'plugin:dialog|open': () => [path],
+    import_paths: () => {
+      throw new Error(`Rostery could not read ${path}. Check that it is the original file from the Source.`);
+    },
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Choose file' }).click();
+  const alert = page.getByRole('alert');
+  await expect(alert).toContainText('very_long_folder_name');
+
+  for (const width of [1200, 800, 500]) {
+    await page.setViewportSize({ width, height: 800 });
+    const overflow = await page.evaluate(() => {
+      const main = document.querySelector('main')!;
+      const drop = document.querySelector('.drop')!.getBoundingClientRect();
+      const box = document.querySelector('[role="alert"]')!.getBoundingClientRect();
+      return {
+        sideways: main.scrollWidth - main.clientWidth,
+        pastTheBox: box.right - drop.right,
+      };
+    });
+    expect(overflow.sideways, `main scrolls sideways at ${width}px`).toBeLessThanOrEqual(0);
+    expect(overflow.pastTheBox, `the error leaves its box at ${width}px`).toBeLessThanOrEqual(0);
+  }
+});
+
+test('focus stays on the button through an import', async ({ page }) => {
+  const imported: unknown[] = [];
+  let finish = () => {};
+  await installMockIpc(page, {
+    ...empty,
+    'plugin:dialog|open': () => ['/d/my_spotify_data.zip'],
+    import_paths: (args) => {
+      imported.push(args);
+      return new Promise((resolve) => (finish = () => resolve({ ...nothing, filesRead: 1, added: 5 })));
+    },
+  });
+
+  await page.goto('/');
+  const choose = page.getByRole('button', { name: 'Choose file' });
+  await choose.focus();
+  await page.keyboard.press('Enter');
+
+  await expect(page.getByRole('status')).toContainText('Reading your history');
+  await expect(choose).toBeFocused();
+  await expect(choose).toBeDisabled();
+
+  // Still in place, and still not usable twice.
+  await page.keyboard.press('Enter');
+  await page.getByRole('button', { name: 'Choose folder' }).dispatchEvent('click');
+  await page.getByRole('button', { name: 'Try demo data' }).dispatchEvent('click');
+
+  finish();
+  await expect(page.getByRole('status')).toHaveText('Added 5 Plays.');
+  await expect(choose).toBeFocused();
+  await expect(choose).toBeEnabled();
+  expect(imported).toHaveLength(1);
+  // Try demo data has no mock here, so a click that got through would show up as an error.
+  await expect(page.getByRole('alert')).toBeHidden();
+});
+
+test('clearing demo data hands focus to the button that is left', async ({ page }) => {
+  let demo = true;
+  await installMockIpc(page, {
+    totals: () => ({ spotify: none, youtube: none }),
+    has_demo_data: () => demo,
+    clear_demo: () => {
+      demo = false;
+      return { spotify: none, youtube: none };
+    },
+  });
+
+  await page.goto('/');
+  const clear = page.getByRole('button', { name: 'Clear demo data' });
+  await clear.focus();
+  await page.keyboard.press('Enter');
+
+  await expect(clear).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Try demo data' })).toBeFocused();
 });

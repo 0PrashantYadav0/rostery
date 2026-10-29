@@ -24,4 +24,5 @@ export interface ImportSummary {
   excludedPrivate: number;
   excludedAds: number;
   rejected: number;
+  skippedReason: string | null;
 }

@@ -4,13 +4,13 @@
 
 **Blocked by:** 02
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Takeout JSON imports, including when the file name is in another language
-- [ ] Ads are left out and the summary says how many
-- [ ] Deleted videos are stored without a Creator and do not break anything
-- [ ] Searches and other non-watch activity are ignored
-- [ ] A `watch-history.html` file gets a message explaining how to choose JSON
-- [ ] A folder holding both Exports imports both
+- [x] Takeout JSON imports, including when the file name is in another language
+- [x] Ads are left out and the summary says how many
+- [x] Deleted videos are stored without a Creator and do not break anything
+- [x] Searches and other non-watch activity are ignored
+- [x] A `watch-history.html` file gets a message explaining how to choose JSON
+- [x] A folder holding both Exports imports both
 
 Stop point 1 follows this ticket.

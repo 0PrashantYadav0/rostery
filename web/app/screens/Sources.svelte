@@ -25,6 +25,7 @@
   let missedDrop = $state(false);
   let error = $state('');
   let dropZone = $state<HTMLElement>();
+  let tryDemo = $state<HTMLElement>();
 
   // The Rust side sends its message as a string. Anything else is a real Error.
   const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -36,6 +37,7 @@
 
   /** Runs an action, then shows what is stored now, even when the action failed part way. */
   async function run(action: () => Promise<unknown>) {
+    if (busy) return;
     busy = true;
     error = '';
     try {
@@ -52,6 +54,10 @@
   }
 
   async function runImport(paths: string[]) {
+    if (busy) {
+      missedDrop = true;
+      return;
+    }
     result = '';
     missedDrop = false;
     importing = true;
@@ -62,6 +68,7 @@
   }
 
   async function choose(pick: () => Promise<string[] | null>) {
+    if (busy) return;
     try {
       const picked = await pick();
       if (picked?.length) await runImport(picked);
@@ -70,15 +77,19 @@
     }
   }
 
+  async function clearDemoData() {
+    await run(clearDemo);
+    // Its button is gone now, and focus would otherwise fall to the page.
+    if (!hasDemo) tryDemo?.focus();
+  }
+
   onMount(() => {
     refresh().catch((e) => (error = message(e)));
     let unlisten: (() => void) | undefined;
     let gone = false;
     onFileDrop((event) => {
       dragging = !busy && (event.type === 'enter' || event.type === 'over');
-      if (event.type !== 'drop') return;
-      if (busy) missedDrop = true;
-      else runImport(event.paths);
+      if (event.type === 'drop') runImport(event.paths);
     })
       .then((stop) => (gone ? stop() : (unlisten = stop)))
       // Outside the desktop app there is nothing to drop onto. Choose file still works.
@@ -177,11 +188,12 @@
 
   <div class="import" class:over={dragging}>
     <div class="drop" bind:this={dropZone}>
-      <h2>Add your Spotify history</h2>
-      <p>Drop the zip, a JSON file or a folder from Spotify here.</p>
+      <h2>Add your history</h2>
+      <p>Drop the zip, a JSON file or a folder from Spotify or Google Takeout here.</p>
       <div class="picks">
-        <button class="primary" onclick={() => choose(chooseExport)} disabled={busy}>Choose file</button>
-        <button onclick={() => choose(chooseFolder)} disabled={busy}>Choose folder</button>
+        <!-- aria-disabled, because a disabled button drops keyboard focus to the page. Each handler checks busy. -->
+        <button class="primary" onclick={() => choose(chooseExport)} aria-disabled={busy}>Choose file</button>
+        <button onclick={() => choose(chooseFolder)} aria-disabled={busy}>Choose folder</button>
       </div>
       <!-- Always mounted: a screen reader only announces a live region that was there before its text changed. -->
       <p role="status" class:result={!importing}>{status}</p>
@@ -189,8 +201,8 @@
         <p class="error" role="alert">{error}</p>
       {/if}
     </div>
-    <div class="howto">
-      <h3>Where to get it</h3>
+    <div class="howto spotify">
+      <h3>Get your Spotify Export</h3>
       <ol>
         <li>In Spotify, go to Account, Privacy settings, Download your data.</li>
         <li>
@@ -200,12 +212,24 @@
         <li>Spotify emails a link when it is ready, which can take up to 30 days. Drop the zip here.</li>
       </ol>
     </div>
+    <div class="howto youtube">
+      <h3>Get your YouTube Export</h3>
+      <ol>
+        <li>Go to takeout.google.com, click <b>Deselect all</b>, then tick <b>YouTube and YouTube Music</b>.</li>
+        <li>
+          Takeout gives you history as HTML unless you change it, and Rostery cannot read HTML. Click
+          <b>Multiple formats</b> and set history to <b>JSON</b>.
+        </li>
+        <li>Create the Export. Google emails you a link when it is ready. Drop the zip here.</li>
+      </ol>
+      <p>YouTube does not let apps read your watch history through its API, so this Export is the only way to get it.</p>
+    </div>
   </div>
 
   <div class="actions">
-    <button class="primary" onclick={() => run(loadDemo)} disabled={busy}>Try demo data</button>
+    <button class="primary" bind:this={tryDemo} onclick={() => run(loadDemo)} aria-disabled={busy}>Try demo data</button>
     {#if hasDemo}
-      <button onclick={() => run(clearDemo)} disabled={busy}>Clear demo data</button>
+      <button onclick={clearDemoData} aria-disabled={busy}>Clear demo data</button>
     {/if}
     {#if loaded && all === 0}
       <p>Nothing here yet. Demo data is made-up history, so you can look around first.</p>
@@ -344,6 +368,7 @@
 
   /* The dashed edge marks a place to drop things; it turns brass while a file is over it. */
   .drop {
+    grid-column: 1 / -1;
     display: flex;
     flex-direction: column;
     align-items: flex-start;
@@ -369,6 +394,8 @@
   .drop p {
     margin: 0;
     color: var(--dim);
+    /* A file path has few places to break. WebKit before Safari 15.4 only knows the older word-break. */
+    word-break: break-word;
     overflow-wrap: anywhere;
   }
 
@@ -391,8 +418,10 @@
     gap: 12px;
   }
 
+  /* Each how-to sits under its Source's dial and takes that dial's colour. */
   h3 {
     margin: 0 0 10px;
+    color: var(--ink);
     font: 600 18px/1.2 var(--serif);
   }
 
@@ -411,8 +440,14 @@
   }
 
   li::marker {
-    color: var(--brass);
+    color: var(--ink);
     font-variant-numeric: tabular-nums;
+  }
+
+  .howto p {
+    margin: 14px 0 0;
+    padding-top: 12px;
+    border-top: 1px solid var(--rule);
   }
 
   b {
@@ -441,7 +476,7 @@
     cursor: pointer;
   }
 
-  button:hover:not(:disabled) {
+  button:hover:not([aria-disabled='true']) {
     border-color: var(--faint);
   }
 
@@ -452,7 +487,7 @@
     font-weight: 600;
   }
 
-  button:disabled {
+  button[aria-disabled='true'] {
     opacity: 0.5;
     cursor: default;
   }

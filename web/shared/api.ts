@@ -12,7 +12,8 @@ export const importPaths = (paths: string[]) => invoke<ImportSummary>('import_pa
 
 /** Opens the system file picker. Resolves to null when the person cancels. */
 export const chooseExport = () =>
-  open({ multiple: true, filters: [{ name: 'Export (.zip or .json)', extensions: ['zip', 'json'] }] });
+  // HTML is offered so that a Takeout in HTML gets its message, not a file the picker greys out.
+  open({ multiple: true, filters: [{ name: 'Export', extensions: ['zip', 'json', 'html'] }] });
 
 /** The same, for someone who unzipped their download. */
 export const chooseFolder = () => open({ multiple: true, directory: true });

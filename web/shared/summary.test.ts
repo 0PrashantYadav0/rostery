@@ -10,6 +10,7 @@ const noImport: ImportSummary = {
   excludedPrivate: 0,
   excludedAds: 0,
   rejected: 0,
+  skippedReason: null,
 };
 
 describe('describeImport', () => {
@@ -34,6 +35,12 @@ describe('describeImport', () => {
     );
     expect(describeImport({ ...noImport, added: 2, filesSkipped: 3 })).toBe(
       'Added 2 Plays. Left out 3 files Rostery could not read.',
+    );
+  });
+
+  it('says why a file was left out', () => {
+    expect(describeImport({ ...noImport, added: 2, filesSkipped: 1, skippedReason: 'It is in HTML.' })).toBe(
+      'Added 2 Plays. Left out 1 file Rostery could not read. It is in HTML.',
     );
   });
 
