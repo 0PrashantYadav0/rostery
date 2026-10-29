@@ -560,8 +560,17 @@ fn unrecognised_input_explains_what_to_do() {
     let mut store = Store::open_in_memory().unwrap();
     for input in [file.as_path(), dir.path()] {
         let message = import_path(&mut store, input).unwrap_err().to_string();
-        assert!(message.contains("Spotify"), "{message}");
-        assert!(message.contains("Google Takeout"), "{message}");
+        // The steps for both Exports, not only their names.
+        for words in [
+            "Download your data",
+            "Extended streaming history",
+            "takeout.google.com",
+            "YouTube and YouTube Music",
+            "Multiple formats",
+            "JSON",
+        ] {
+            assert!(message.contains(words), "{words}: {message}");
+        }
     }
 }
 
@@ -578,8 +587,6 @@ fn history_bytes() -> Vec<u8> {
 
 /// Valid JSON that looks like history in its first 4 KB, as a Wrapped summary might.
 const LOOK_ALIKE: &[u8] = br#"{"yearlyMetrics":{"msPlayed":1200}}"#;
-const TAKEOUT: &[u8] =
-    br#"[{"titleUrl":"https://www.youtube.com/watch?v=abc","products":["YouTube"]}]"#;
 
 #[test]
 fn a_stray_file_in_a_folder_is_counted_and_the_rest_imported() {
@@ -599,10 +606,9 @@ fn a_stray_file_in_a_folder_is_counted_and_the_rest_imported() {
 }
 
 #[test]
-fn a_broken_or_takeout_file_is_skipped_inside_a_folder_or_zip() {
+fn a_broken_file_is_skipped_inside_a_folder_or_zip() {
     let entries = [
         ("broken.json", br#"[{"ms_played": 5"#.as_slice()),
-        ("takeout.json", TAKEOUT),
         ("history.json", &history_bytes()),
         ("later.json", br#"[{"ms_played": 5"#),
     ];
@@ -622,7 +628,7 @@ fn a_broken_or_takeout_file_is_skipped_inside_a_folder_or_zip() {
         let summary = import_path(&mut store, input).unwrap();
         assert_eq!(
             (summary.files_read, summary.files_skipped, summary.added),
-            (1, 3, 1)
+            (1, 2, 1)
         );
     }
 }
@@ -658,7 +664,6 @@ fn the_one_path_chosen_still_fails_with_a_message() {
     };
     assert!(import("export.zip", b"not a zip").contains("Download the zip"));
     assert!(import("broken.json", br#"[{"ms_played": 5"#).contains("broken.json"));
-    assert!(import("takeout.json", TAKEOUT).contains("not available yet"));
     assert!(import("Wrapped2024.json", LOOK_ALIKE).contains("did not find"));
 }
 

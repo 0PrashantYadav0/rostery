@@ -2,11 +2,13 @@
 //! Formats are found by content, never by file name.
 
 mod spotify_export;
+mod takeout;
 
 use crate::error::{Error, Result};
-use crate::model::Source;
+use crate::model::{Play, Source};
 use crate::store::{dedupe_key, Store};
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde_json::value::RawValue;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::fs::File;
@@ -18,6 +20,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const SNIFF_BYTES: usize = 4096;
 /// The biggest single history file Rostery will hold in memory.
 const MAX_FILE_BYTES: u64 = 1 << 30;
+/// A Takeout page opens with a long stylesheet, so its first links are further in than a JSON row.
+const HTML_SNIFF_BYTES: u64 = 1 << 20;
+/// A file value decides which API Plays get deleted, so a Play from the future is never believed.
+/// A day of slack covers a computer whose clock runs a little behind.
+const CLOCK_SLACK: i64 = 86_400;
+/// How to get history out of Takeout in the one format Rostery reads.
+const TAKEOUT_STEPS: &str = "go to takeout.google.com, tick YouTube and YouTube Music, click \
+     Multiple formats and set history to JSON";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
@@ -36,17 +46,20 @@ pub struct ImportSummary {
     pub excluded_private: u64,
     pub excluded_ads: u64,
     pub rejected: u64,
+    /// Why the first skipped file was left out, for when the import still found other files.
+    pub skipped_reason: Option<String>,
 }
 
 /// Looks only at the first 4 KB of a file.
 pub fn detect_format(head: &[u8]) -> Option<Format> {
     let head = &head[..head.len().min(SNIFF_BYTES)];
-    let has = |needle: &str| head.windows(needle.len()).any(|w| w == needle.as_bytes());
+    let has = |needle: &str| contains(head, needle);
     if has("\"ms_played\"") {
         Some(Format::SpotifyExtended)
     } else if has("\"msPlayed\"") {
         Some(Format::SpotifyAccount)
-    } else if has("\"titleUrl\"") && has("\"products\"") {
+    // A removed video has no `titleUrl`, so a file of only those is known by its `header`.
+    } else if has("\"products\"") && (has("\"titleUrl\"") || has("\"header\"")) {
         Some(Format::TakeoutActivity)
     } else {
         None
@@ -79,13 +92,12 @@ pub fn import_paths(store: &mut Store, paths: &[impl AsRef<Path>]) -> Result<Imp
     }
     if run.summary.files_read == 0 {
         return Err(run.first_skip.unwrap_or_else(|| {
-            Error::Import(
-                "Rostery did not find a Spotify or YouTube Export there. Choose the .zip, the .json files \
-                 or the folder from Spotify's \"Download your data\" (Extended streaming history or \
-                 Account data), or the watch history JSON from Google Takeout. A Takeout in HTML cannot \
-                 be read, so request it again as JSON."
-                    .into(),
-            )
+            Error::Import(format!(
+                "Rostery did not find a Spotify or YouTube Export there. For Spotify, go to Account, \
+                 Privacy settings, Download your data, and request Extended streaming history. For \
+                 YouTube, {TAKEOUT_STEPS}. Each one emails you a link when the Export is ready. Choose \
+                 the zip, the JSON files or the folder it gives you."
+            ))
         }));
     }
     // Inside its own span an Export holds what the API saw, so those copies can go. Outside it an
@@ -99,6 +111,7 @@ pub fn import_paths(store: &mut Store, paths: &[impl AsRef<Path>]) -> Result<Imp
     }
     // Net of what private rows took back out, so `added` matches what the dials gain.
     run.summary.added = run.summary.added.saturating_sub(run.removed_private);
+    run.summary.skipped_reason = run.first_skip.map(|e| e.to_string());
     Ok(run.summary)
 }
 
@@ -111,7 +124,7 @@ struct Import<'a> {
     private: HashSet<String>,
     /// Stored Plays taken back out because a private row named them.
     removed_private: u64,
-    /// Becomes the error when no file at all could be read.
+    /// Becomes the error when no file at all could be read, and otherwise the summary's reason.
     first_skip: Option<Error>,
 }
 
@@ -150,13 +163,9 @@ impl Import<'_> {
         }
         match extension(path).as_deref() {
             Some("zip") => self.zip(path),
-            Some("json") => {
+            Some("json" | "html") => {
                 let file = File::open(path).map_err(|e| unreadable(path.display(), e))?;
-                let label = path.display().to_string();
-                match read_history(file, &label)? {
-                    Some((format, bytes)) => self.add(&label, format, &bytes),
-                    None => Ok(()),
-                }
+                self.file(&path.display().to_string(), file)
             }
             _ => Ok(()),
         }
@@ -179,17 +188,31 @@ impl Import<'_> {
         i: usize,
     ) -> Result<()> {
         let mut entry = archive.by_index(i).map_err(|_| bad_zip(path))?;
-        // A name that is not valid text cannot be a Spotify history file.
+        // A name that is not valid text cannot be a history file from a Source.
         let Ok(name) = entry.name().map(|n| n.into_owned()) else {
             return Ok(());
         };
-        if !entry.is_file() || extension(Path::new(&name)).as_deref() != Some("json") {
+        if !entry.is_file() {
             return Ok(());
         }
-        let label = format!("{}/{name}", path.display());
-        match read_history(&mut entry, &label)? {
-            Some((format, bytes)) => self.add(&label, format, &bytes),
-            None => Ok(()),
+        self.file(&format!("{}/{name}", path.display()), &mut entry)
+    }
+
+    /// One file from a folder or a zip. Anything that is not history is not a problem either.
+    fn file(&mut self, label: &str, mut reader: impl Read) -> Result<()> {
+        match extension(Path::new(label)).as_deref() {
+            Some("json") => match read_history(reader, label)? {
+                Some((format, bytes)) => self.add(label, format, &bytes),
+                None => Ok(()),
+            },
+            Some("html") if is_takeout_html(&mut reader, label)? => {
+                Err(Error::Import(format!(
+                    "Rostery cannot read {label}. It is a Google Takeout in HTML, which is what Takeout \
+                     gives you for history unless you change it. To get JSON, {TAKEOUT_STEPS}, then \
+                     create the Export again. Google emails you a link when it is ready."
+                )))
+            }
+            _ => Ok(()),
         }
     }
 
@@ -201,12 +224,7 @@ impl Import<'_> {
         let parsed = match format {
             Format::SpotifyExtended => spotify_export::parse_extended(bytes, now),
             Format::SpotifyAccount => spotify_export::parse_account(bytes, now),
-            // Task 3 replaces this arm.
-            Format::TakeoutActivity => {
-                return Err(Error::Import(format!(
-                "{label} is a Google Takeout file. Importing YouTube history is not available yet."
-            )))
-            }
+            Format::TakeoutActivity => takeout::parse(bytes, now),
         };
         let mut parsed = match parsed {
             Ok(parsed) => parsed,
@@ -243,6 +261,7 @@ impl Import<'_> {
         s.added += count.added;
         s.duplicates += count.duplicates;
         s.excluded_private += parsed.excluded_private;
+        s.excluded_ads += parsed.excluded_ads;
         s.rejected += parsed.rejected;
         Ok(())
     }
@@ -250,6 +269,12 @@ impl Import<'_> {
 
 fn extension(path: &Path) -> Option<String> {
     Some(path.extension()?.to_str()?.to_ascii_lowercase())
+}
+
+fn contains(haystack: &[u8], needle: &str) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|w| w == needle.as_bytes())
 }
 
 fn bad_zip(path: &Path) -> Error {
@@ -297,4 +322,107 @@ fn read_history(mut reader: impl Read, label: &str) -> Result<Option<(Format, Ve
         )));
     }
     Ok(Some((format, bytes)))
+}
+
+/// A Takeout page is mostly links to what was watched. Every Takeout also carries an index page,
+/// `archive_browser.html`, which has none of those and is not a problem.
+// ponytail: a saved web page linking to a video also matches, so it costs one skipped file and a
+// message that does not apply. Tell them apart by Takeout's markup if that ever happens in practice.
+fn is_takeout_html(reader: impl Read, label: &str) -> Result<bool> {
+    let mut head = Vec::new();
+    reader
+        .take(HTML_SNIFF_BYTES)
+        .read_to_end(&mut head)
+        .map_err(|e| unreadable(label, e))?;
+    Ok(contains(&head, "youtube.com/watch") || contains(&head, "youtube.com/shorts"))
+}
+
+/// What one history file holds, whichever Source wrote it.
+#[derive(Default)]
+struct Parsed {
+    plays: Vec<Play>,
+    /// Private rows readable enough to name the Play. They are never stored.
+    private: Vec<Play>,
+    excluded_private: u64,
+    excluded_ads: u64,
+    rejected: u64,
+}
+
+impl Parsed {
+    fn keep(&mut self, play: Option<Play>) {
+        match play {
+            Some(play) => self.plays.push(play),
+            None => self.rejected += 1,
+        }
+    }
+}
+
+/// The file must be a list. Each row is read on its own, so a row of the wrong shape costs that
+/// row and not the file. `RawValue` only marks where a row is, which keeps the fields a row
+/// struct does not name out of memory as parsed data.
+fn each_row<T: DeserializeOwned>(
+    bytes: &[u8],
+    mut read: impl FnMut(&mut Parsed, T),
+) -> serde_json::Result<Parsed> {
+    let mut out = Parsed::default();
+    for raw in serde_json::from_slice::<Vec<&RawValue>>(bytes)? {
+        match serde_json::from_str(raw.get()) {
+            Ok(row) => read(&mut out, row),
+            Err(_) => out.rejected += 1,
+        }
+    }
+    Ok(out)
+}
+
+/// A file's time as Unix seconds, if it could be a real Play.
+fn played_at(time: &str, earliest: i64, now: i64) -> Option<i64> {
+    parse_utc(time).filter(|t| (earliest..=now + CLOCK_SLACK).contains(t))
+}
+
+/// `2024-03-01T13:05:42Z` or `2024-03-01 13:05` as Unix seconds. Both Sources write UTC, and
+/// Spotify's account format has no seconds. Anything after the seconds (fraction, `Z`) is ignored.
+fn parse_utc(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    let num = |from: usize, to: usize| -> Option<i64> {
+        let digits = b.get(from..to)?;
+        digits
+            .iter()
+            .all(u8::is_ascii_digit)
+            .then(|| digits.iter().fold(0, |n, d| n * 10 + i64::from(d - b'0')))
+    };
+    let shape_ok = b.get(4) == Some(&b'-')
+        && b.get(7) == Some(&b'-')
+        && matches!(b.get(10), Some(b'T' | b' '))
+        && b.get(13) == Some(&b':');
+    if !shape_ok {
+        return None;
+    }
+    let (year, month, day) = (num(0, 4)?, num(5, 7)?, num(8, 10)?);
+    let (hour, minute) = (num(11, 13)?, num(14, 16)?);
+    let second = if b.get(16) == Some(&b':') {
+        num(17, 19)?
+    } else {
+        0
+    };
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let last_day = match month {
+        2 => 28 + i64::from(leap),
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if !(1..=12).contains(&month)
+        || !(1..=last_day).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return None;
+    }
+    // Days since 1970-01-01 from the civil date (Howard Hinnant's days_from_civil).
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
+    let days = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
+    Some(days * 86_400 + hour * 3600 + minute * 60 + second)
 }
