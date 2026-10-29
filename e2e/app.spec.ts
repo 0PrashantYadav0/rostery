@@ -289,8 +289,9 @@ test('dragging a file brings the drop zone on screen in a small window', async (
 
 const htmlMessage =
   'Rostery cannot read /d/watch-history.html. It is a Google Takeout in HTML, which is what Takeout gives you for ' +
-  'history unless you change it. To get JSON, go to takeout.google.com, tick YouTube and YouTube Music, click ' +
-  'Multiple formats and set history to JSON, then create the Export again. Google emails you a link when it is ready.';
+  'history unless you change it. To get JSON, go to takeout.google.com, click Deselect all, tick YouTube and YouTube ' +
+  'Music, click Multiple formats and set history to JSON, then create the Export again. Google emails you a link when ' +
+  'it is ready.';
 
 test('html file shows json guidance', async ({ page }) => {
   const dialogs: any[] = [];

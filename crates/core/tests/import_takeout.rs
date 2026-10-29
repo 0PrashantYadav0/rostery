@@ -98,15 +98,25 @@ fn creators(store: &Store) -> Vec<String> {
         .collect()
 }
 
-/// A page the way Takeout writes it: a long stylesheet, then the links. The default format.
-fn takeout_html() -> Vec<u8> {
+/// A page the way Takeout writes it: a long stylesheet, a header naming the product, then links.
+/// Written from what parsers of these pages select, not copied from a real file.
+fn activity_html(product: &str) -> Vec<u8> {
     format!(
         "<html><head><style>{}</style></head><body>\
-         <div class=\"content-cell\">Watched <a href=\"https://www.youtube.com/watch?v=abc123\">Night Drive Mix</a></div>\
-         </body></html>",
+         <div class=\"outer-cell mdl-cell mdl-cell--12-col\"><div class=\"mdl-grid\">\
+         <div class=\"header-cell mdl-cell mdl-cell--12-col\">\
+         <p class=\"mdl-typography--title\">{product}<br></p></div>\
+         <div class=\"content-cell mdl-cell mdl-cell--6-col mdl-typography--body-1\">\
+         Watched <a href=\"https://www.youtube.com/watch?v=abc123\">Night Drive Mix</a></div>\
+         </div></div></body></html>",
         ".mdl-cell { margin: 8px; }\n".repeat(400)
     )
     .into_bytes()
+}
+
+/// HTML is the default format for YouTube history.
+fn takeout_html() -> Vec<u8> {
+    activity_html("YouTube")
 }
 
 /// Every Takeout carries this index page, whatever format was chosen. It lists no Plays.
@@ -658,7 +668,13 @@ fn html_export_explains_json() {
     let message = import_path(&mut Store::open_in_memory().unwrap(), &file)
         .unwrap_err()
         .to_string();
-    for words in ["watch-history.html", "HTML", "Multiple formats", "JSON"] {
+    for words in [
+        "watch-history.html",
+        "HTML",
+        "Deselect all",
+        "Multiple formats",
+        "JSON",
+    ] {
         assert!(message.contains(words), "{words}: {message}");
     }
 }
@@ -741,6 +757,84 @@ fn the_takeout_index_page_is_not_a_problem() {
         .unwrap_err()
         .to_string();
     assert!(message.contains("did not find"), "{message}");
+}
+
+#[test]
+fn a_page_that_only_links_to_youtube_is_not_a_problem() {
+    let bookmarks = b"<!DOCTYPE NETSCAPE-Bookmark-file-1><DL><p><DT>\
+        <A HREF=\"https://www.youtube.com/watch?v=abc123\">Night Drive Mix</A></DL>"
+        .to_vec();
+    let history = json!([
+        watch("Low Tide", "2024-03-01T13:05:00.000Z"),
+        watch("Soft Static", "2024-03-01T13:09:00.000Z"),
+    ]);
+    let dir = TempDir::new().unwrap();
+    // A Takeout of a whole account, with history set to JSON as the steps say.
+    let zip = write_zip(
+        dir.path(),
+        "takeout.zip",
+        &[
+            ("Takeout/Chrome/Bookmarks.html", bookmarks.clone()),
+            (
+                "Takeout/My Activity/Chrome/MyActivity.html",
+                activity_html("Chrome"),
+            ),
+            (
+                "Takeout/My Activity/Search/MyActivity.html",
+                activity_html("Search"),
+            ),
+            (
+                "Takeout/YouTube and YouTube Music/history/watch-history.json",
+                serde_json::to_vec(&history).unwrap(),
+            ),
+        ],
+    );
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .insert_plays(&[api_play(Source::Youtube, MINUTE + 60, "Api Channel")])
+        .unwrap();
+    let summary = import_path(&mut store, &zip).unwrap();
+    assert_eq!((summary.files_read, summary.files_skipped), (1, 0));
+    assert_eq!(summary.skipped_reason, None);
+    // Nothing was left unread, so the overlap rule still runs.
+    assert!(!creators(&store).contains(&"Api Channel".to_string()));
+
+    // On its own it is simply not an Export.
+    let alone = dir.path().join("Bookmarks.html");
+    std::fs::write(&alone, bookmarks).unwrap();
+    let message = import_path(&mut Store::open_in_memory().unwrap(), &alone)
+        .unwrap_err()
+        .to_string();
+    assert!(message.contains("did not find"), "{message}");
+}
+
+#[test]
+fn a_youtube_page_with_no_watches_is_not_a_problem() {
+    let dir = TempDir::new().unwrap();
+    write_json(
+        dir.path(),
+        "watch-history.json",
+        &json!([watch("Low Tide", TIME)]),
+    );
+    let searches = String::from_utf8(takeout_html())
+        .unwrap()
+        .replace("watch?v=abc123", "results?search_query=slow+math");
+    std::fs::write(dir.path().join("search-history.html"), searches).unwrap();
+    let summary = import_path(&mut Store::open_in_memory().unwrap(), dir.path()).unwrap();
+    assert_eq!((summary.files_read, summary.files_skipped), (1, 0));
+}
+
+#[test]
+fn every_youtube_history_page_is_found() {
+    let dir = TempDir::new().unwrap();
+    for product in ["YouTube", "YouTube Music"] {
+        let file = dir.path().join("MyActivity.html");
+        std::fs::write(&file, activity_html(product)).unwrap();
+        let message = import_path(&mut Store::open_in_memory().unwrap(), &file)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("Takeout in HTML"), "{product}: {message}");
+    }
 }
 
 #[test]

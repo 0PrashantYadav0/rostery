@@ -28,8 +28,8 @@ const CLOCK_SLACK: i64 = 86_400;
 /// Longer than any real ID. A video's has 11 characters, a Spotify Item's 22 and a channel's 24.
 const MAX_ID_BYTES: usize = 64;
 /// How to get history out of Takeout in the one format Rostery reads.
-const TAKEOUT_STEPS: &str = "go to takeout.google.com, tick YouTube and YouTube Music, click \
-     Multiple formats and set history to JSON";
+const TAKEOUT_STEPS: &str = "go to takeout.google.com, click Deselect all, tick YouTube and \
+     YouTube Music, click Multiple formats and set history to JSON";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
@@ -330,17 +330,19 @@ fn read_history(mut reader: impl Read, label: &str) -> Result<Option<(Format, Ve
     Ok(Some((format, bytes)))
 }
 
-/// A Takeout page is mostly links to what was watched. Every Takeout also carries an index page,
-/// `archive_browser.html`, which has none of those and is not a problem.
-// ponytail: a saved web page linking to a video also matches, so it costs one skipped file and a
-// message that does not apply. Tell them apart by Takeout's markup if that ever happens in practice.
+/// A page of YouTube history names the product in Takeout's header and links to what was watched.
+/// Anything else is not a problem: a Chrome or Search page and a bookmarks file can link to a video,
+/// and the index page every Takeout carries, `archive_browser.html`, has no such links.
+// ponytail: the header's exact bytes come from parsers of these pages, not from a real file. Check
+// at stop point 1. If they differ, a page alone gets the general message, which has the same steps.
 fn is_takeout_html(reader: impl Read, label: &str) -> Result<bool> {
     let mut head = Vec::new();
     reader
         .take(HTML_SNIFF_BYTES)
         .read_to_end(&mut head)
         .map_err(|e| unreadable(label, e))?;
-    Ok(contains(&head, "youtube.com/watch") || contains(&head, "youtube.com/shorts"))
+    Ok(contains(&head, "mdl-typography--title\">YouTube")
+        && (contains(&head, "youtube.com/watch") || contains(&head, "youtube.com/shorts")))
 }
 
 /// An ID from a file goes on to build URLs, and a file is untrusted, so it has to look like an ID.
