@@ -1,5 +1,5 @@
 use rostery_core::{demo, ingest::ImportSummary, model::Totals, store::Store, Error};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
 
@@ -40,7 +40,10 @@ pub fn has_demo_data(state: State<'_, AppState>) -> Result<bool, Error> {
 }
 
 #[tauri::command(async)]
-pub fn import_path(state: State<'_, AppState>, path: String) -> Result<ImportSummary, Error> {
+pub fn import_paths(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+) -> Result<ImportSummary, Error> {
     let mut store = Store::open(&state.db_path)?;
-    rostery_core::ingest::import_path(&mut store, Path::new(&path))
+    rostery_core::ingest::import_paths(&mut store, &paths)
 }

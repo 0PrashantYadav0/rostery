@@ -8,11 +8,14 @@ export const totals = () => invoke<Totals>('totals');
 export const loadDemo = () => invoke<Totals>('load_demo');
 export const clearDemo = () => invoke<Totals>('clear_demo');
 export const hasDemoData = () => invoke<boolean>('has_demo_data');
-export const importPath = (path: string) => invoke<ImportSummary>('import_path', { path });
+export const importPaths = (paths: string[]) => invoke<ImportSummary>('import_paths', { paths });
 
 /** Opens the system file picker. Resolves to null when the person cancels. */
 export const chooseExport = () =>
   open({ multiple: true, filters: [{ name: 'Export (.zip or .json)', extensions: ['zip', 'json'] }] });
+
+/** The same, for someone who unzipped their download. */
+export const chooseFolder = () => open({ multiple: true, directory: true });
 
 /** Files dropped on the window. Async so a missing Tauri runtime (a plain browser) rejects instead of throwing. */
 export async function onFileDrop(handler: (event: DragDropEvent) => void) {

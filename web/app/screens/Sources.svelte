@@ -2,14 +2,15 @@
   import { onMount } from 'svelte';
   import {
     chooseExport,
+    chooseFolder,
     clearDemo,
     hasDemoData,
-    importPath,
+    importPaths,
     loadDemo,
     onFileDrop,
     totals as fetchTotals,
   } from '../../shared/api';
-  import { addSummaries, describeImport, noImport } from '../../shared/summary';
+  import { describeImport } from '../../shared/summary';
   import type { Totals } from '../../shared/types';
 
   const none = { plays: 0, minutes: 0, creators: 0, firstPlay: null, lastPlay: null };
@@ -21,7 +22,9 @@
   let importing = $state(false);
   let dragging = $state(false);
   let result = $state('');
+  let missedDrop = $state(false);
   let error = $state('');
+  let dropZone = $state<HTMLElement>();
 
   // The Rust side sends its message as a string. Anything else is a real Error.
   const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -48,21 +51,20 @@
     busy = false;
   }
 
-  async function importPaths(paths: string[]) {
+  async function runImport(paths: string[]) {
     result = '';
+    missedDrop = false;
     importing = true;
     await run(async () => {
-      let sum = noImport;
-      for (const path of paths) sum = addSummaries(sum, await importPath(path));
-      result = describeImport(sum);
+      result = describeImport(await importPaths(paths));
     });
     importing = false;
   }
 
-  async function choose() {
+  async function choose(pick: () => Promise<string[] | null>) {
     try {
-      const picked = await chooseExport();
-      if (picked?.length) await importPaths(picked);
+      const picked = await pick();
+      if (picked?.length) await runImport(picked);
     } catch (e) {
       error = message(e);
     }
@@ -73,8 +75,10 @@
     let unlisten: (() => void) | undefined;
     let gone = false;
     onFileDrop((event) => {
-      dragging = event.type === 'enter' || event.type === 'over';
-      if (event.type === 'drop' && !busy) importPaths(event.paths);
+      dragging = !busy && (event.type === 'enter' || event.type === 'over');
+      if (event.type !== 'drop') return;
+      if (busy) missedDrop = true;
+      else runImport(event.paths);
     })
       .then((stop) => (gone ? stop() : (unlisten = stop)))
       // Outside the desktop app there is nothing to drop onto. Choose file still works.
@@ -83,6 +87,20 @@
       gone = true;
       unlisten?.();
     };
+  });
+
+  const status = $derived.by(() => {
+    const line = importing ? 'Reading your history. A big file takes a few seconds.' : result;
+    if (!missedDrop) return line;
+    const note = busy
+      ? 'That file was not read. Drop it again when this finishes.'
+      : 'The file you dropped during that was not read. Drop it again.';
+    return `${line} ${note}`.trim();
+  });
+
+  // The panel sits under the dials, so without this a message can land off screen.
+  $effect(() => {
+    if ([dragging, importing, status, error].some(Boolean)) dropZone?.scrollIntoView({ block: 'nearest' });
   });
 
   const all = $derived(totals.spotify.plays + totals.youtube.plays);
@@ -158,14 +176,17 @@
   </div>
 
   <div class="import" class:over={dragging}>
-    <div class="drop">
+    <div class="drop" bind:this={dropZone}>
       <h2>Add your Spotify history</h2>
       <p>Drop the zip, a JSON file or a folder from Spotify here.</p>
-      <button class="primary" onclick={choose} disabled={busy}>Choose file</button>
-      {#if importing}
-        <p role="status">Reading your history. A big file takes a few seconds.</p>
-      {:else if result}
-        <p role="status" class="result">{result}</p>
+      <div class="picks">
+        <button class="primary" onclick={() => choose(chooseExport)} disabled={busy}>Choose file</button>
+        <button onclick={() => choose(chooseFolder)} disabled={busy}>Choose folder</button>
+      </div>
+      <!-- Always mounted: a screen reader only announces a live region that was there before its text changed. -->
+      <p role="status" class:result={!importing}>{status}</p>
+      {#if error}
+        <p class="error" role="alert">{error}</p>
       {/if}
     </div>
     <div class="howto">
@@ -190,9 +211,6 @@
       <p>Nothing here yet. Demo data is made-up history, so you can look around first.</p>
     {/if}
   </div>
-  {#if error}
-    <p class="error" role="alert">{error}</p>
-  {/if}
 </div>
 
 <style>
@@ -351,10 +369,26 @@
   .drop p {
     margin: 0;
     color: var(--dim);
+    overflow-wrap: anywhere;
   }
 
   .drop .result {
     color: var(--ivory);
+  }
+
+  .drop .error {
+    color: #f08a7e;
+  }
+
+  /* Out of the flow while it has nothing to say, so it adds no gap, but still there to be announced. */
+  [role='status']:empty {
+    position: absolute;
+  }
+
+  .picks {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
   }
 
   h3 {
@@ -421,11 +455,6 @@
   button:disabled {
     opacity: 0.5;
     cursor: default;
-  }
-
-  .error {
-    margin: 16px 0 0;
-    color: #f08a7e;
   }
 
   @media (prefers-reduced-motion: reduce) {

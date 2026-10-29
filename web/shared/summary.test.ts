@@ -1,5 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { addSummaries, describeImport, noImport } from './summary';
+import { describeImport } from './summary';
+import type { ImportSummary } from './types';
+
+const noImport: ImportSummary = {
+  filesRead: 0,
+  filesSkipped: 0,
+  added: 0,
+  duplicates: 0,
+  excludedPrivate: 0,
+  excludedAds: 0,
+  rejected: 0,
+};
 
 describe('describeImport', () => {
   it('says what was added and what was left out', () => {
@@ -17,13 +28,16 @@ describe('describeImport', () => {
     );
   });
 
+  it('says how many files it could not read', () => {
+    expect(describeImport({ ...noImport, added: 2, filesSkipped: 1 })).toBe(
+      'Added 2 Plays. Left out 1 file Rostery could not read.',
+    );
+    expect(describeImport({ ...noImport, added: 2, filesSkipped: 3 })).toBe(
+      'Added 2 Plays. Left out 3 files Rostery could not read.',
+    );
+  });
+
   it('reports a repeat import as nothing new', () => {
     expect(describeImport({ ...noImport, duplicates: 300 })).toBe('Added 0 Plays. 300 Plays were already here.');
   });
-});
-
-it('adds the summaries of several files', () => {
-  const a = { ...noImport, filesRead: 1, added: 5, duplicates: 1, excludedPrivate: 2 };
-  const b = { ...noImport, filesRead: 3, added: 7, rejected: 4 };
-  expect(addSummaries(a, b)).toEqual({ ...noImport, filesRead: 4, added: 12, duplicates: 1, excludedPrivate: 2, rejected: 4 });
 });

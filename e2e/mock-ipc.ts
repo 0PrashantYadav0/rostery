@@ -21,6 +21,14 @@ export async function installMockIpc(page: Page, handlers: Handlers) {
   await page.addInitScript(`(() => {
     const exports = {};
     ${mocks}
-    exports.mockIPC((cmd, args) => window.__mockIpc(cmd, args));
+    exports.mockWindows('main');
+    exports.mockIPC((cmd, args) => window.__mockIpc(cmd, args), { shouldMockEvents: true });
   })()`);
 }
+
+/** Sends the page a Tauri event, the way the desktop shell reports a file being dragged. */
+export const emitEvent = (page: Page, event: string, payload?: unknown) =>
+  page.evaluate(
+    ([event, payload]) => (window as any).__TAURI_INTERNALS__.invoke('plugin:event|emit', { event, payload }),
+    [event, payload] as const,
+  );

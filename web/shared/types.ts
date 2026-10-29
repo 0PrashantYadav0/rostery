@@ -18,6 +18,7 @@ export interface Totals {
 
 export interface ImportSummary {
   filesRead: number;
+  filesSkipped: number;
   added: number;
   duplicates: number;
   excludedPrivate: number;
