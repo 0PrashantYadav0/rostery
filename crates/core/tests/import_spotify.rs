@@ -910,6 +910,54 @@ fn export_replaces_overlapping_api_plays() {
 }
 
 #[test]
+fn an_api_play_in_the_gap_between_two_files_stays() {
+    const YEAR: i64 = 365 * 86_400;
+    let api = |at: i64, creator: &str| Play {
+        source: Source::Spotify,
+        origin: Origin::Api,
+        played_at: at,
+        duration_ms: None,
+        creator: creator.into(),
+        creator_ref: None,
+        item: "Song".into(),
+        item_ref: None,
+        skipped: false,
+    };
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .insert_plays(&[
+            api(MINUTE - 2 * YEAR, "Inside 2022"),
+            api(MINUTE - YEAR, "In the gap"),
+            api(MINUTE, "Inside 2024"),
+        ])
+        .unwrap();
+
+    // Old Account downloads kept in one folder. Each spans a year, and neither holds 2023.
+    let dir = TempDir::new().unwrap();
+    for (name, year) in [("a_2022.json", 2022), ("b_2024.json", 2024)] {
+        write_json(
+            dir.path(),
+            name,
+            &json!([
+                extended(&format!("{year}-01-10T12:00:00Z"), "A", "T", 200_000),
+                extended(&format!("{year}-12-10T12:00:00Z"), "A", "U", 200_000),
+            ]),
+        );
+    }
+    let summary = import_path(&mut store, dir.path()).unwrap();
+    assert_eq!((summary.files_read, summary.files_skipped), (2, 0));
+
+    let api_left: Vec<String> = store
+        .plays(None)
+        .unwrap()
+        .into_iter()
+        .filter(|p| p.origin == Origin::Api)
+        .map(|p| p.creator)
+        .collect();
+    assert_eq!(api_left, ["In the gap"]);
+}
+
+#[test]
 fn export_keeps_the_api_play_it_repeats() {
     let mut store = Store::open_in_memory().unwrap();
     store

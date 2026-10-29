@@ -207,8 +207,9 @@ impl Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
-    /// After an Export import: API Plays from the import's oldest Play to its newest, inclusive,
-    /// are in the Export now. Outside that span an API Play may be held nowhere else, so it stays.
+    /// After an Export import, once per file: API Plays from the file's oldest Play to its newest,
+    /// inclusive, are in the Export now. Outside that span an API Play may be held nowhere else, so
+    /// it stays.
     pub fn replace_api_plays_in_span(
         &mut self,
         source: Source,

@@ -9,7 +9,7 @@ use crate::model::{Play, Source};
 use crate::store::{dedupe_key, Store};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::value::RawValue;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fmt::Display;
 use std::fs::File;
 use std::io::{ErrorKind, Read};
@@ -79,7 +79,7 @@ pub fn import_paths(store: &mut Store, paths: &[impl AsRef<Path>]) -> Result<Imp
     let mut run = Import {
         store,
         summary: ImportSummary::default(),
-        spans: HashMap::new(),
+        spans: Vec::new(),
         private: HashSet::new(),
         removed_private: 0,
         first_skip: None,
@@ -102,11 +102,13 @@ pub fn import_paths(store: &mut Store, paths: &[impl AsRef<Path>]) -> Result<Imp
             ))
         }));
     }
-    // Inside its own span an Export holds what the API saw, so those copies can go. Outside it an
-    // API Play may be held nowhere else. With a file left unread even the span is not certain, and
-    // an API Play cannot be fetched again.
+    // Inside a file's own span an Export holds what the API saw, so those copies can go. Anywhere
+    // else, including a gap between two files, an API Play may be held nowhere else. With a file
+    // left unread the Export is not whole, and an API Play cannot be fetched again.
+    // ponytail: an API Play between two files of one Export stays too, and can count twice if its
+    // Export copy landed in another minute. At most one per file boundary, and losing it is worse.
     if run.summary.files_skipped == 0 {
-        for (&source, &(oldest, newest)) in &run.spans {
+        for &(source, oldest, newest) in &run.spans {
             run.store
                 .replace_api_plays_in_span(source, oldest, newest)?;
         }
@@ -120,8 +122,8 @@ pub fn import_paths(store: &mut Store, paths: &[impl AsRef<Path>]) -> Result<Imp
 struct Import<'a> {
     store: &'a mut Store,
     summary: ImportSummary,
-    /// Each Source's oldest and newest Play in this import.
-    spans: HashMap<Source, (i64, i64)>,
+    /// Each file's Source, with its oldest and newest Play.
+    spans: Vec<(Source, i64, i64)>,
     /// Dedupe keys of the private rows seen so far in this import.
     private: HashSet<String>,
     /// Stored Plays taken back out because a private row named them.
@@ -252,10 +254,12 @@ impl Import<'_> {
                 .plays
                 .retain(|p| !self.private.contains(&dedupe_key(p)));
         }
-        for p in &parsed.plays {
-            let t = p.played_at;
-            let span = self.spans.entry(p.source).or_insert((t, t));
-            *span = (span.0.min(t), span.1.max(t));
+        // A parser reads one Source, so the first Play speaks for the file.
+        let times = parsed.plays.iter().map(|p| p.played_at);
+        if let (Some(play), Some(oldest), Some(newest)) =
+            (parsed.plays.first(), times.clone().min(), times.max())
+        {
+            self.spans.push((play.source, oldest, newest));
         }
         let count = self.store.insert_plays(&parsed.plays)?;
         let s = &mut self.summary;
