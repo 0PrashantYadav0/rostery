@@ -8,8 +8,9 @@ use crate::model::Source;
 use crate::store::{dedupe_key, Store};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::fmt::Display;
 use std::fs::File;
-use std::io::Read;
+use std::io::{ErrorKind, Read};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -129,15 +130,17 @@ impl Import<'_> {
     }
 
     fn path(&mut self, path: &Path) -> Result<()> {
-        std::fs::metadata(path).map_err(|e| unreadable(path, e))?;
+        std::fs::metadata(path).map_err(|e| unreadable(path.display(), e))?;
         if path.is_dir() {
             let mut entries = std::fs::read_dir(path)
                 .and_then(|dir| dir.collect::<std::io::Result<Vec<_>>>())
-                .map_err(|e| unreadable(path, e))?;
+                .map_err(|e| unreadable(path.display(), e))?;
             entries.sort_by_key(|e| e.file_name());
             for entry in entries {
                 // file_type does not follow links, so a link back up the tree cannot loop.
-                let kind = entry.file_type().map_err(|e| unreadable(path, e))?;
+                let kind = entry
+                    .file_type()
+                    .map_err(|e| unreadable(path.display(), e))?;
                 if kind.is_dir() || kind.is_file() {
                     let result = self.path(&entry.path());
                     self.skip_bad_file(result)?;
@@ -148,9 +151,10 @@ impl Import<'_> {
         match extension(path).as_deref() {
             Some("zip") => self.zip(path),
             Some("json") => {
-                let file = File::open(path).map_err(|e| unreadable(path, e))?;
-                match read_history(file).map_err(|e| unreadable(path, e))? {
-                    Some((format, bytes)) => self.add(&path.display().to_string(), format, &bytes),
+                let file = File::open(path).map_err(|e| unreadable(path.display(), e))?;
+                let label = path.display().to_string();
+                match read_history(file, &label)? {
+                    Some((format, bytes)) => self.add(&label, format, &bytes),
                     None => Ok(()),
                 }
             }
@@ -159,8 +163,8 @@ impl Import<'_> {
     }
 
     fn zip(&mut self, path: &Path) -> Result<()> {
-        let file = File::open(path).map_err(|e| unreadable(path, e))?;
-        let mut archive = zip::ZipArchive::new(file).map_err(|e| bad_zip(path, e))?;
+        let file = File::open(path).map_err(|e| unreadable(path.display(), e))?;
+        let mut archive = zip::ZipArchive::new(file).map_err(|_| bad_zip(path))?;
         for i in 0..archive.len() {
             let result = self.zip_entry(path, &mut archive, i);
             self.skip_bad_file(result)?;
@@ -174,7 +178,7 @@ impl Import<'_> {
         archive: &mut zip::ZipArchive<File>,
         i: usize,
     ) -> Result<()> {
-        let mut entry = archive.by_index(i).map_err(|e| bad_zip(path, e))?;
+        let mut entry = archive.by_index(i).map_err(|_| bad_zip(path))?;
         // A name that is not valid text cannot be a Spotify history file.
         let Ok(name) = entry.name().map(|n| n.into_owned()) else {
             return Ok(());
@@ -183,7 +187,7 @@ impl Import<'_> {
             return Ok(());
         }
         let label = format!("{}/{name}", path.display());
-        match read_history(&mut entry).map_err(|e| unreadable(Path::new(&label), e))? {
+        match read_history(&mut entry, &label)? {
             Some((format, bytes)) => self.add(&label, format, &bytes),
             None => Ok(()),
         }
@@ -209,9 +213,10 @@ impl Import<'_> {
             // Valid JSON that is not a list of rows, such as a Wrapped summary, only looked like
             // history. Sniffing is a substring match, so this is not a problem with the file.
             Err(e) if e.is_data() => return Ok(()),
-            Err(e) => {
+            Err(_) => {
                 return Err(Error::Import(format!(
-                    "Rostery could not read {label}: {e}. Download the Export again from the Source and retry."
+                    "Rostery could not read {label}. It looks damaged or cut short. Download the \
+                     Export again from the Source and retry."
                 )))
             }
         };
@@ -247,32 +252,49 @@ fn extension(path: &Path) -> Option<String> {
     Some(path.extension()?.to_str()?.to_ascii_lowercase())
 }
 
-fn bad_zip(path: &Path, e: zip::result::ZipError) -> Error {
+fn bad_zip(path: &Path) -> Error {
     Error::Import(format!(
-        "Rostery could not open {}: {e}. Download the zip from Spotify again and retry.",
+        "Rostery could not open {}. It looks damaged or only part downloaded. Download the zip again \
+         from the Source and retry.",
         path.display()
     ))
 }
 
-fn unreadable(path: &Path, e: impl std::fmt::Display) -> Error {
-    Error::Import(format!(
-        "Rostery could not read {}: {e}. Check that it is the original file from the Source and that you can open it.",
-        path.display()
-    ))
+fn unreadable(label: impl Display, e: std::io::Error) -> Error {
+    Error::Import(match e.kind() {
+        ErrorKind::NotFound => {
+            format!("Rostery could not find {label}. Check that it is still there and choose it again.")
+        }
+        ErrorKind::PermissionDenied => format!(
+            "Rostery does not have permission to read {label}. Allow it in your system settings, or \
+             move the file somewhere you can open it, and try again."
+        ),
+        _ => format!(
+            "Rostery could not read {label}. Check that it is the original file from the Source and \
+             that you can open it."
+        ),
+    })
 }
 
 /// Reads the head, and the rest only when the head looks like a known Export.
-fn read_history(mut reader: impl Read) -> std::io::Result<Option<(Format, Vec<u8>)>> {
+fn read_history(mut reader: impl Read, label: &str) -> Result<Option<(Format, Vec<u8>)>> {
     let mut bytes = Vec::new();
     (&mut reader)
         .take(SNIFF_BYTES as u64)
-        .read_to_end(&mut bytes)?;
+        .read_to_end(&mut bytes)
+        .map_err(|e| unreadable(label, e))?;
     let Some(format) = detect_format(&bytes) else {
         return Ok(None);
     };
-    reader.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes)?;
+    reader
+        .take(MAX_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| unreadable(label, e))?;
     if bytes.len() as u64 > MAX_FILE_BYTES {
-        return Err(std::io::Error::other("it is over 1 GiB"));
+        return Err(Error::Import(format!(
+            "Rostery cannot read {label}, because it is over 1 GiB. Check that it is the original file \
+             from the Source."
+        )));
     }
     Ok(Some((format, bytes)))
 }

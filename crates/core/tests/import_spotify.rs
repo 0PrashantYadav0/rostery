@@ -663,6 +663,75 @@ fn the_one_path_chosen_still_fails_with_a_message() {
 }
 
 #[test]
+fn errors_say_what_to_do_without_parser_zip_or_os_text() {
+    let dir = TempDir::new().unwrap();
+    // Without the folder, so a temp path cannot trip the checks below.
+    let import = |path: &Path| {
+        import_path(&mut Store::open_in_memory().unwrap(), path)
+            .unwrap_err()
+            .to_string()
+            .replace(dir.path().to_str().unwrap(), "")
+    };
+    let write = |name: &str, bytes: &[u8]| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, bytes).unwrap();
+        path
+    };
+    let cases = [
+        (
+            import(&dir.path().join("nowhere.json")),
+            "Check that it is still there",
+        ),
+        (
+            import(&write("truncated.json", br#"[{"ms_played": 5"#)),
+            "Download the Export again",
+        ),
+        (
+            import(&write("not_a.zip", b"not a zip")),
+            "Download the zip again",
+        ),
+        (
+            import(&write("cut.zip", b"PK\x03\x04 and then nothing")),
+            "Download the zip again",
+        ),
+    ];
+    for (message, next_step) in cases {
+        assert!(message.contains(next_step), "{next_step}: {message}");
+        for internal in [
+            "os error",
+            "No such file",
+            "line 1",
+            "column",
+            "EOF",
+            "expected",
+            "invalid Zip",
+            "Invalid Zip",
+            "archive",
+        ] {
+            assert!(!message.contains(internal), "{internal}: {message}");
+        }
+    }
+}
+
+#[test]
+fn a_file_that_may_not_be_read_says_so() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("locked.json");
+    std::fs::write(&file, history_bytes()).unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Root reads anything, so there is nothing to see there.
+    if std::fs::File::open(&file).is_ok() {
+        return;
+    }
+    let message = import_path(&mut Store::open_in_memory().unwrap(), &file)
+        .unwrap_err()
+        .to_string();
+    assert!(message.contains("permission"), "{message}");
+    assert!(!message.contains("os error"), "{message}");
+}
+
+#[test]
 fn when_nothing_could_be_read_the_first_problem_is_the_error() {
     let dir = TempDir::new().unwrap();
     std::fs::write(dir.path().join("export.zip"), b"not a zip").unwrap();
