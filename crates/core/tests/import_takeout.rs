@@ -213,7 +213,7 @@ fn an_ad_with_a_translated_label_or_no_link_is_still_an_ad() {
 
 #[test]
 fn deleted_videos_have_empty_creator() {
-    let mut empty_list = watch("Lost Tape", TIME);
+    let mut empty_list = watch("Lost Tape", "2024-03-01T13:06:00.000Z");
     empty_list["subtitles"] = json!([]);
     let (store, summary) = import_rows(json!([
         without(
@@ -248,7 +248,11 @@ fn a_removed_video_has_no_link_and_is_still_a_play() {
     );
     let translated = without(
         without(
-            row("Vous avez regardé une vidéo supprimée", "", TIME),
+            row(
+                "Vous avez regardé une vidéo supprimée",
+                "",
+                "2024-03-01T13:06:00.000Z",
+            ),
             "titleUrl",
         ),
         "subtitles",
@@ -582,6 +586,68 @@ fn importing_twice_adds_nothing() {
     import_path(&mut store, &file).unwrap();
     let again = import_path(&mut store, &file).unwrap();
     assert_eq!((again.added, again.duplicates), (0, 1));
+}
+
+#[test]
+fn a_later_takeout_that_rewords_a_watch_adds_nothing() {
+    let time = |minute: u32| format!("2024-03-01T13:{minute:02}:42.123Z");
+    let link = |id: &str| format!("https://www.youtube.com/watch?v={id}");
+    let dir = TempDir::new().unwrap();
+    let first = write_json(
+        dir.path(),
+        "first.json",
+        &json!([
+            row("Watched Original Title", &link("title1"), &time(1)),
+            row("Watched Soon Gone", &link("gone01"), &time(2)),
+            row("Watched Soon Removed", &link("gone02"), &time(3)),
+            row("Watched By Old Name", &link("chan01"), &time(4)),
+            row("Watched Foo", &link("lang01"), &time(5)),
+        ]),
+    );
+    // Takeout writes all of this when it exports, so the same watches can come back like this.
+    let mut renamed = row("Watched By Old Name", &link("chan01"), &time(4));
+    renamed["subtitles"][0]["name"] = json!("Morning Lark Radio");
+    let second = write_json(
+        dir.path(),
+        "second.json",
+        &json!([
+            row("Watched New Title", &link("title1"), &time(1)),
+            without(
+                row(
+                    &format!("Watched {}", link("gone01")),
+                    &link("gone01"),
+                    &time(2)
+                ),
+                "subtitles"
+            ),
+            without(
+                without(
+                    row("Watched a video that has been removed", "", &time(3)),
+                    "titleUrl"
+                ),
+                "subtitles"
+            ),
+            renamed,
+            row("Visionn\u{e9} Foo", &link("lang01"), &time(5)),
+        ]),
+    );
+    for (one, other) in [(&first, &second), (&second, &first)] {
+        let mut store = Store::open_in_memory().unwrap();
+        assert_eq!(import_path(&mut store, one).unwrap().added, 5);
+        let again = import_path(&mut store, other).unwrap();
+        assert_eq!((again.added, again.duplicates), (0, 5));
+        assert_eq!(store.totals().unwrap().youtube.plays, 5);
+    }
+}
+
+#[test]
+fn watching_a_video_again_within_the_minute_is_another_play() {
+    let (store, summary) = import_rows(json!([
+        watch("Tiny Compilers", "2024-03-01T13:05:10.000Z"),
+        watch("Tiny Compilers", "2024-03-01T13:05:40.000Z"),
+    ]));
+    assert_eq!((summary.added, summary.duplicates), (2, 0));
+    assert_eq!(store.plays(None).unwrap().len(), 2);
 }
 
 #[test]

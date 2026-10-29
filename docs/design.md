@@ -103,7 +103,7 @@ roasts(id, created_at, provider_label, json)
 settings(key PRIMARY KEY, value)
 ```
 
-`dedupe_key` is `source|floor(played_at/60)|creator|item`. Minute precision lets Spotify's account format, which only has minutes, and its extended format, which has seconds, collapse into one Play, and the extended copy's details are kept whichever is imported first. Re-importing a file adds nothing. `played_at` is Unix seconds in UTC.
+`dedupe_key` is `source|floor(played_at/60)|creator|item`. Minute precision lets Spotify's account format, which only has minutes, and its extended format, which has seconds, collapse into one Play, and the extended copy's details are kept whichever is imported first. A YouTube Export Play is keyed `youtube|played_at` instead, because Takeout writes a watch's title, channel and wording when it exports, so a later Takeout can repeat a watch in other words. Its times have seconds, and two watches begun in the same second count once. Demo Plays keep the first form, so made-up history cannot hide a real watch. Re-importing a file adds nothing. `played_at` is Unix seconds in UTC.
 
 Two rules keep Origins consistent. When an Export is imported and every file in it could be read, API Plays of that Source inside each file's own oldest to newest span, inclusive, are deleted. An API Play outside those spans stays, even in a gap between two files, because an Account file only spans about a year and that Play may be held nowhere else. When a Connection syncs, Plays at or before the newest Export Play are skipped.
 

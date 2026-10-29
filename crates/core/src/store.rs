@@ -59,10 +59,18 @@ pub struct InsertCount {
 }
 
 /// Minute precision lets Spotify's minutes-only and seconds formats collapse into one Play.
+/// Takeout writes a watch's title, channel and wording when it exports, so a later Takeout can
+/// repeat a watch in other words, and only its exact second says it is the same watch. Demo Plays
+/// keep the first form, so made-up history cannot hide a real watch.
+// ponytail: two watches begun in the same second count once. The video ID cannot tell them apart,
+// because a later Takeout has no link for a video that has since been removed.
 pub(crate) fn dedupe_key(p: &Play) -> String {
+    let source = p.source.as_str();
+    if p.source == Source::Youtube && p.origin == Origin::Export {
+        return format!("{source}|{}", p.played_at);
+    }
     format!(
-        "{}|{}|{}|{}",
-        p.source.as_str(),
+        "{source}|{}|{}|{}",
         p.played_at.div_euclid(60),
         p.creator,
         p.item
@@ -315,6 +323,41 @@ mod tests {
         assert_eq!((first.added, first.duplicates), (1, 1));
         let second = store.insert_plays(&[at(1020)]).unwrap();
         assert_eq!(second.added, 1);
+        assert_eq!(store.plays(None).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_youtube_export_play_is_known_by_its_second() {
+        let mut store = Store::open_in_memory().unwrap();
+        let watch = |creator, item, at| Play {
+            origin: Origin::Export,
+            ..play(Source::Youtube, creator, item, at)
+        };
+        let first = store
+            .insert_plays(&[watch("Old Name", "Old Title", 1000)])
+            .unwrap();
+        assert_eq!((first.added, first.duplicates), (1, 0));
+        let reworded = store
+            .insert_plays(&[watch("New Name", "New Title", 1000)])
+            .unwrap();
+        assert_eq!((reworded.added, reworded.duplicates), (0, 1));
+        let next_second = store
+            .insert_plays(&[watch("Old Name", "Old Title", 1001)])
+            .unwrap();
+        assert_eq!(next_second.added, 1);
+    }
+
+    #[test]
+    fn demo_data_never_hides_a_watch_at_the_same_second() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .insert_plays(&[play(Source::Youtube, "Cache Miss", "Tiny Compilers", 1000)])
+            .unwrap();
+        let watch = Play {
+            origin: Origin::Export,
+            ..play(Source::Youtube, "Real Channel", "Real Video", 1000)
+        };
+        assert_eq!(store.insert_plays(&[watch]).unwrap().added, 1);
         assert_eq!(store.plays(None).unwrap().len(), 2);
     }
 
