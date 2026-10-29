@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// Every Interest of each Creator, sorted, with no repeats.
+pub type InterestMap = HashMap<(Source, String), Vec<String>>;
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 pub enum Source {
     Spotify,

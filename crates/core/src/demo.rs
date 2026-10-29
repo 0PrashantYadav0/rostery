@@ -291,18 +291,23 @@ pub fn load(store: &mut Store, now: i64) -> Result<InsertCount> {
             now
         }
     };
-    store.insert_plays(&generate(DEMO_SEED, anchor).plays)
+    let demo = generate(DEMO_SEED, anchor);
+    for (source, creator, tags) in &demo.interests {
+        store.set_interests(*source, creator, tags, Origin::Demo.as_str(), anchor)?;
+    }
+    store.insert_plays(&demo.plays)
 }
 
-/// Removes demo Plays only. Plays from an Export or Connection stay.
+/// Removes demo Plays, Interests and Affinities. What came from an Export or Connection stays.
 pub fn clear(store: &mut Store) -> Result<u64> {
-    Ok(store.delete_origin(Source::Spotify, Origin::Demo)?
-        + store.delete_origin(Source::Youtube, Origin::Demo)?)
+    store.delete_demo()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Affinity;
+    use crate::store::DEMO_KIND;
     use std::collections::HashSet;
 
     const NOW: i64 = 1_800_000_000;
@@ -378,5 +383,53 @@ mod tests {
         let removed = clear(&mut store).unwrap();
         assert!(removed >= 1000);
         assert_eq!(store.totals().unwrap(), Default::default());
+    }
+
+    #[test]
+    fn load_stores_demo_interests() {
+        let mut store = Store::open_in_memory().unwrap();
+        load(&mut store, NOW).unwrap();
+        let interests = store.interests().unwrap();
+        assert_eq!(interests.len(), 60);
+        assert_eq!(
+            interests[&(Source::Spotify, "Moth Season".to_string())],
+            ["dream pop", "dreamy", "shoegaze"]
+        );
+    }
+
+    #[test]
+    fn clear_removes_demo_interests_and_affinities_and_keeps_real_ones() {
+        let mut store = Store::open_in_memory().unwrap();
+        load(&mut store, NOW).unwrap();
+        let liked = |kind: &str| Affinity {
+            source: Source::Spotify,
+            creator: "Moth Season".into(),
+            creator_ref: None,
+            kind: kind.into(),
+            score: 10.0,
+            fetched_at: NOW,
+        };
+        store
+            .set_affinities(Source::Spotify, DEMO_KIND, &[liked(DEMO_KIND)])
+            .unwrap();
+        store
+            .set_affinities(Source::Spotify, "top_artist", &[liked("top_artist")])
+            .unwrap();
+        let real = ["indie".to_string()];
+        store
+            .set_interests(Source::Spotify, "Moth Season", &real, "spotify_api", NOW)
+            .unwrap();
+
+        clear(&mut store).unwrap();
+
+        // Only what came from a real Source is left, even on a Creator the demo also named.
+        let interests = store.interests().unwrap();
+        assert_eq!(interests.len(), 1);
+        assert_eq!(
+            interests[&(Source::Spotify, "Moth Season".to_string())],
+            real
+        );
+        assert_eq!(store.affinities().unwrap(), [liked("top_artist")]);
+        assert!(!store.has_demo_data().unwrap());
     }
 }

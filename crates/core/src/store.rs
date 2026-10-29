@@ -1,5 +1,5 @@
 use crate::error::Result;
-use crate::model::{Origin, Play, Source, SourceTotals, Totals};
+use crate::model::{Affinity, InterestMap, Origin, Play, Source, SourceTotals, Totals};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{de::DeserializeOwned, Serialize};
 use std::path::Path;
@@ -47,6 +47,9 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT NOT NULL
 );
 ";
+
+/// Affinities have no Origin of their own, so this `kind` is what marks a demo one.
+pub const DEMO_KIND: &str = "demo";
 
 pub struct Store {
     conn: Connection,
@@ -258,6 +261,118 @@ impl Store {
             "DELETE FROM plays WHERE source = ?1 AND origin = ?2",
             [source.as_str(), origin.as_str()],
         )? as u64)
+    }
+
+    /// One transaction, so demo data never half leaves. Returns how many Plays went.
+    pub fn delete_demo(&mut self) -> Result<u64> {
+        let tx = self.conn.transaction()?;
+        let plays = tx.execute("DELETE FROM plays WHERE origin = 'demo'", [])?;
+        tx.execute("DELETE FROM interests WHERE origin = 'demo'", [])?;
+        tx.execute("DELETE FROM affinities WHERE kind = ?1", [DEMO_KIND])?;
+        tx.commit()?;
+        Ok(plays as u64)
+    }
+
+    pub fn affinities(&self) -> Result<Vec<Affinity>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT source, creator, creator_ref, kind, score, fetched_at
+             FROM affinities ORDER BY source, kind, creator",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let source: String = r.get(0)?;
+            Ok(Affinity {
+                source: Source::from_db(&source).ok_or_else(|| unknown(0, "source", &source))?,
+                creator: r.get(1)?,
+                creator_ref: r.get(2)?,
+                kind: r.get(3)?,
+                score: r.get(4)?,
+                fetched_at: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// One transaction. What a sync says about one Source and kind replaces what it said before,
+    /// so a Creator who fell off the list goes. Each row's own `source` and `kind` are not read.
+    pub fn set_affinities(
+        &mut self,
+        source: Source,
+        kind: &str,
+        affinities: &[Affinity],
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM affinities WHERE source = ?1 AND kind = ?2",
+            [source.as_str(), kind],
+        )?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR REPLACE INTO affinities
+                 (source, creator, creator_ref, kind, score, fetched_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+            for a in affinities {
+                stmt.execute(params![
+                    source.as_str(),
+                    a.creator,
+                    a.creator_ref,
+                    kind,
+                    a.score,
+                    a.fetched_at
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Every origin's Interests together, since a tag means the same wherever it came from.
+    pub fn interests(&self) -> Result<InterestMap> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT source, creator, interest FROM interests ORDER BY interest",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut all = InterestMap::new();
+        while let Some(r) = rows.next()? {
+            let source: String = r.get(0)?;
+            let source = Source::from_db(&source).ok_or_else(|| unknown(0, "source", &source))?;
+            all.entry((source, r.get(1)?)).or_default().push(r.get(2)?);
+        }
+        Ok(all)
+    }
+
+    /// One transaction. Replaces what this origin says about this Creator, and leaves what other
+    /// origins say.
+    pub fn set_interests(
+        &mut self,
+        source: Source,
+        creator: &str,
+        interests: &[String],
+        origin: &str,
+        fetched_at: i64,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM interests WHERE source = ?1 AND creator = ?2 AND origin = ?3",
+            [source.as_str(), creator, origin],
+        )?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR REPLACE INTO interests (source, creator, interest, origin, fetched_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            for interest in interests {
+                stmt.execute(params![
+                    source.as_str(),
+                    creator,
+                    interest,
+                    origin,
+                    fetched_at
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn get_setting<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
@@ -519,6 +634,132 @@ mod tests {
                 Err(Error::Db(rusqlite::Error::FromSqlConversionFailure(..)))
             ));
         }
+    }
+
+    fn affinity(source: Source, creator: &str, kind: &str, score: f64) -> Affinity {
+        Affinity {
+            source,
+            creator: creator.into(),
+            creator_ref: Some("spotify:artist:abc".into()),
+            kind: kind.into(),
+            score,
+            fetched_at: 5,
+        }
+    }
+
+    #[test]
+    fn set_affinities_replaces_one_source_and_kind() {
+        let mut store = Store::open_in_memory().unwrap();
+        let top = affinity(Source::Spotify, "Moth Season", "top_artist", 500.0);
+        let gone = affinity(Source::Spotify, "Grim Parsley", "top_artist", 490.0);
+        let other_kind = affinity(Source::Youtube, "Cache Miss", "liked", 15.0);
+        let other_source = affinity(Source::Youtube, "Cache Miss", "top_artist", 60.0);
+        store
+            .set_affinities(Source::Spotify, "top_artist", &[top.clone(), gone])
+            .unwrap();
+        store
+            .set_affinities(Source::Youtube, "liked", std::slice::from_ref(&other_kind))
+            .unwrap();
+        store
+            .set_affinities(
+                Source::Youtube,
+                "top_artist",
+                std::slice::from_ref(&other_source),
+            )
+            .unwrap();
+
+        // The Creator who fell off the list goes, and every other list stays.
+        store
+            .set_affinities(Source::Spotify, "top_artist", std::slice::from_ref(&top))
+            .unwrap();
+        assert_eq!(
+            store.affinities().unwrap(),
+            [top, other_kind.clone(), other_source]
+        );
+
+        store
+            .set_affinities(Source::Youtube, "top_artist", &[])
+            .unwrap();
+        store
+            .set_affinities(Source::Spotify, "top_artist", &[])
+            .unwrap();
+        assert_eq!(store.affinities().unwrap(), [other_kind]);
+    }
+
+    #[test]
+    fn set_interests_replaces_one_origin_and_interests_merges_them() {
+        let mut store = Store::open_in_memory().unwrap();
+        let tags = |t: &[&str]| t.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let key = (Source::Spotify, "Moth Season".to_string());
+        store
+            .set_interests(
+                Source::Spotify,
+                "Moth Season",
+                &tags(&["shoegaze", "dream pop"]),
+                "ai",
+                1,
+            )
+            .unwrap();
+        store
+            .set_interests(
+                Source::Spotify,
+                "Moth Season",
+                &tags(&["shoegaze", "indie"]),
+                "spotify_api",
+                1,
+            )
+            .unwrap();
+        // The same Creator on the other Source is another Creator.
+        store
+            .set_interests(Source::Youtube, "Moth Season", &tags(&["cooking"]), "ai", 1)
+            .unwrap();
+
+        let all = store.interests().unwrap();
+        assert_eq!(all[&key], ["dream pop", "indie", "shoegaze"]);
+        assert_eq!(
+            all[&(Source::Youtube, "Moth Season".to_string())],
+            ["cooking"]
+        );
+
+        store
+            .set_interests(Source::Spotify, "Moth Season", &tags(&["noise"]), "ai", 2)
+            .unwrap();
+        assert_eq!(
+            store.interests().unwrap()[&key],
+            ["indie", "noise", "shoegaze"]
+        );
+
+        store
+            .set_interests(Source::Spotify, "Moth Season", &[], "ai", 3)
+            .unwrap();
+        assert_eq!(store.interests().unwrap()[&key], ["indie", "shoegaze"]);
+    }
+
+    #[test]
+    fn a_repeated_interest_is_kept_once() {
+        let mut store = Store::open_in_memory().unwrap();
+        let tags = ["lo-fi".to_string(), "lo-fi".to_string()];
+        store
+            .set_interests(Source::Youtube, "Lighthouse Lofi", &tags, "ai", 1)
+            .unwrap();
+        assert_eq!(
+            store.interests().unwrap()[&(Source::Youtube, "Lighthouse Lofi".to_string())],
+            ["lo-fi"]
+        );
+    }
+
+    #[test]
+    fn an_unknown_source_in_affinities_or_interests_is_an_error() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .conn
+            .execute_batch(
+                "INSERT INTO affinities VALUES ('tidal', 'A', NULL, 'top_artist', 1.0, 1);
+                 INSERT INTO interests VALUES ('tidal', 'A', 'jazz', 'ai', 1);",
+            )
+            .unwrap();
+        assert!(matches!(store.affinities(), Err(Error::Db(_))));
+        assert!(matches!(store.interests(), Err(Error::Db(_))));
     }
 
     #[test]
