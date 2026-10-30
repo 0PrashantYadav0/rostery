@@ -101,7 +101,7 @@ pub fn planets(input: &UniverseInput, filter: UniverseFilter) -> Vec<Planet> {
         .map(|(key, t)| (minutes(&t) + t.affinity, key, t))
         .collect();
     ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    keep_within_cap(&mut ranked);
+    ranked.truncate(MAX_PLANETS);
 
     let mut heaviest: HashMap<Source, f64> = HashMap::new();
     for (weight, (source, _), _) in &ranked {
@@ -139,26 +139,6 @@ pub fn planets(input: &UniverseInput, filter: UniverseFilter) -> Vec<Planet> {
             }
         })
         .collect()
-}
-
-/// `ranked` is heaviest first. A Source gets half the places, plus any the other leaves empty, so
-/// each Source's heaviest are the ones kept and neither can push the other out of a combined view.
-///
-/// ponytail: a light Source still gets its half, so 74 one-watch channels can hold places a heavier
-/// artist would fill. Lower the half to a smaller reserve if real histories show that happening.
-fn keep_within_cap<T>(ranked: &mut Vec<(f64, (Source, &str), T)>) {
-    let total = ranked.len();
-    let mut in_source: HashMap<Source, usize> = HashMap::new();
-    for (_, (source, _), _) in ranked.iter() {
-        *in_source.entry(*source).or_default() += 1;
-    }
-    let places = |source: &Source| MAX_PLANETS - (total - in_source[source]).min(MAX_PLANETS / 2);
-    let mut kept: HashMap<Source, usize> = HashMap::new();
-    ranked.retain(|(_, (source, _), _)| {
-        let so_far = kept.entry(*source).or_default();
-        *so_far += 1;
-        *so_far <= places(source)
-    });
 }
 
 fn top_items(items: HashMap<&str, ItemTally>) -> Vec<TopItem> {
@@ -923,32 +903,14 @@ mod tests {
         assert!(u.planets.windows(2).all(|p| p[0].radius >= p[1].radius));
     }
 
-    #[test]
-    fn the_cap_in_both_keeps_both_sources() {
-        // Every Spotify Creator outweighs every channel, so one list by weight would keep no channel.
-        let mut plays: Vec<_> = (0..200)
-            .map(|i| spotify(&format!("Artist {i:03}"), i * DAY, 500 + 100_000 / (i + 1)))
-            .collect();
-        for i in 0..40 {
-            for w in 0..(40 - i) {
-                plays.push(youtube(&format!("Channel {i:03}"), (1000 + i) * DAY + w));
-            }
-        }
-        let u = from_plays(&plays, Both);
-        assert_eq!(u.planets.len(), 150);
-        let channels = u.planets.iter().filter(|p| p.source == Source::Youtube);
-        assert_eq!(channels.count(), 40);
-        assert!(close(planet(&u, "Channel 000").radius, 4.0));
-        assert!(close(planet(&u, "Artist 000").radius, 4.0));
-    }
-
     fn in_source(u: &Universe, source: Source) -> usize {
         u.planets.iter().filter(|p| p.source == source).count()
     }
 
     #[test]
-    fn the_cap_in_both_cannot_cut_nearly_every_artist() {
-        // One watch each is the whole of a light history, and must not outrank months of listening.
+    fn the_cap_in_both_goes_by_weight_alone() {
+        // Ranking on share of each Source would keep 1 artist and 149 channels, and giving each
+        // Source half would keep 75 of each. One watch is not months of listening.
         let mut plays: Vec<_> = (0..200)
             .map(|i| {
                 let minutes = if i == 0 { 100_000 } else { 40_000 - i };
@@ -956,40 +918,36 @@ mod tests {
             })
             .collect();
         plays.extend((0..200).map(|i| youtube(&format!("Channel {i:03}"), (1000 + i) * DAY)));
-        // Its name sorts past the cut, so only its second watch can keep it.
         plays.push(youtube("Channel 199", 2000 * DAY));
+
         let u = from_plays(&plays, Both);
-        assert_eq!(u.planets.len(), 150);
-        assert_eq!(in_source(&u, Source::Spotify), 75);
-        assert_eq!(in_source(&u, Source::Youtube), 75);
-        assert!(u.planets.iter().any(|p| p.name == "Artist 074"));
-        assert!(!u.planets.iter().any(|p| p.name == "Artist 075"));
-        assert!(u.planets.iter().any(|p| p.name == "Channel 199"));
+        assert_eq!(in_source(&u, Source::Spotify), 150);
+        assert_eq!(in_source(&u, Source::Youtube), 0);
+        assert_eq!(u.planets[149].name, "Artist 149");
+
+        // The channels are still in their own view, heaviest first.
+        let channels = from_plays(&plays, Youtube);
+        assert_eq!(channels.planets.len(), 150);
+        assert_eq!(channels.planets[0].name, "Channel 199");
     }
 
     #[test]
-    fn places_a_source_leaves_empty_go_to_the_other() {
-        let artists = |n: i64| -> Vec<Play> {
-            (0..n)
-                .map(|i| spotify(&format!("Artist {i:03}"), i * DAY, 1000 - i))
-                .collect()
-        };
-        let channels = |n: i64| -> Vec<Play> {
-            (0..n)
-                .map(|i| youtube(&format!("Channel {i:03}"), (1000 + i) * DAY))
-                .collect()
-        };
-        let both = |a: i64, c: i64| {
-            let u = from_plays(&[artists(a), channels(c)].concat(), Both);
-            (
-                in_source(&u, Source::Spotify),
-                in_source(&u, Source::Youtube),
-            )
-        };
-        assert_eq!(both(200, 40), (110, 40));
-        assert_eq!(both(40, 200), (40, 110));
-        assert_eq!(both(60, 60), (60, 60));
-        assert_eq!(both(200, 200), (75, 75));
+    fn the_cap_in_both_keeps_a_heavy_channel_over_a_lighter_artist() {
+        // 200 artists of 1,000 minutes down to 801, and channels of 1,040, 880 and 800.
+        let mut plays: Vec<_> = (0..200)
+            .map(|i| spotify(&format!("Artist {i:03}"), i * DAY, 1000 - i))
+            .collect();
+        for (name, watches) in [("Big", 130), ("Middle", 110), ("Light", 100)] {
+            plays.extend((0..watches).map(|w| youtube(name, 1000 * DAY + w)));
+        }
+        let u = from_plays(&plays, Both);
+        assert_eq!(u.planets.len(), 150);
+        assert_eq!(u.planets[0].name, "Big");
+        assert!(u.planets.iter().any(|p| p.name == "Middle"));
+        assert!(!u.planets.iter().any(|p| p.name == "Light"));
+        assert_eq!(in_source(&u, Source::Spotify), 148);
+        assert!(close(planet(&u, "Big").radius, 4.0));
+        assert!(close(planet(&u, "Artist 000").radius, 4.0));
     }
 
     #[test]
