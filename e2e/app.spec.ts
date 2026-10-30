@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { expect, test, type Locator, type Page } from '@playwright/test';
+import { Color } from 'three';
 import { emitEvent, installMockIpc } from './mock-ipc';
 import type { ImportSummary, Planet, SourceTotals, Totals, Universe } from '../web/shared/types';
 
@@ -547,24 +548,40 @@ async function openUniverse(page: Page) {
   await page.getByRole('button', { name: 'Universe' }).click();
 }
 
-/** How many colours are in a screenshot of an element. The page decodes the PNG, so no library is needed. */
-async function distinctColors(page: Page, element: Locator) {
-  const png = (await element.screenshot()).toString('base64');
-  return page.evaluate(async (png) => {
-    const image = new Image();
-    image.src = `data:image/png;base64,${png}`;
-    await image.decode();
-    const canvas = document.createElement('canvas');
-    canvas.width = image.width;
-    canvas.height = image.height;
-    const context = canvas.getContext('2d', { willReadFrequently: true })!;
-    context.drawImage(image, 0, 0);
-    const { data } = context.getImageData(0, 0, image.width, image.height);
-    const colors = new Set<number>();
-    for (let i = 0; i < data.length; i += 4) colors.add((data[i] << 16) | (data[i + 1] << 8) | data[i + 2]);
-    return colors.size;
-  }, png);
+/**
+ * What the canvas drew: how many colours, and the colour at each point. The canvas has alpha, so a screenshot
+ * also holds the page behind it and the words over it, and those alone have hundreds of colours. So this hides
+ * them first. The page decodes the PNG, so no library is needed.
+ */
+async function readCanvas(page: Page, canvas: Locator, points: { x: number; y: number }[] = []) {
+  const hide = await page.addStyleTag({ content: 'main { background: none !important; } header, .note { visibility: hidden; }' });
+  const png = (await canvas.screenshot()).toString('base64');
+  await hide.evaluate((style) => (style as Element).remove());
+  return page.evaluate(
+    async ({ png, points }) => {
+      const image = new Image();
+      image.src = `data:image/png;base64,${png}`;
+      await image.decode();
+      const canvas = document.createElement('canvas');
+      canvas.width = image.width;
+      canvas.height = image.height;
+      const context = canvas.getContext('2d', { willReadFrequently: true })!;
+      context.drawImage(image, 0, 0);
+      const { data } = context.getImageData(0, 0, image.width, image.height);
+      const colors = new Set<number>();
+      for (let i = 0; i < data.length; i += 4) colors.add((data[i] << 16) | (data[i + 1] << 8) | data[i + 2]);
+      const at = ({ x, y }: { x: number; y: number }) => {
+        const i = (Math.round(y) * image.width + Math.round(x)) * 4;
+        return [data[i], data[i + 1], data[i + 2]] as [number, number, number];
+      };
+      return { colors: colors.size, at: points.map(at) };
+    },
+    { png, points },
+  );
 }
+
+const hueOf = ([r, g, b]: [number, number, number]) => new Color(r / 255, g / 255, b / 255).getHSL({ h: 0, s: 0, l: 0 }).h;
+const brightness = ([r, g, b]: [number, number, number]) => Math.max(r, g, b);
 
 test('universe draws something', async ({ page }) => {
   const asked: unknown[] = [];
@@ -585,8 +602,56 @@ test('universe draws something', async ({ page }) => {
   await expect(page.getByRole('button', { name: 'Universe' })).toHaveAttribute('aria-current', 'page');
   await expect(page.getByRole('button', { name: 'Sources' })).not.toHaveAttribute('aria-current', 'page');
   await expect(page.getByRole('heading', { name: 'Add your history' })).toBeHidden();
-  await expect.poll(() => distinctColors(page, canvas), { timeout: 15_000 }).toBeGreaterThan(50);
+  await expect.poll(async () => (await readCanvas(page, canvas)).colors, { timeout: 15_000 }).toBeGreaterThan(50);
   expect(asked).toEqual([{ filter: 'both' }]);
+});
+
+/** Two Planets in their own Galaxies, side by side, with a Link through the middle of the view. */
+function twoPlanets(): Universe {
+  const [a, b] = universe().planets;
+  return {
+    filter: 'both',
+    planets: [
+      { ...a, radius: 3, position: [-12, 0, 0], galaxy: 0 },
+      { ...b, radius: 3, position: [12, 0, 0], galaxy: 1 },
+    ],
+    links: [{ a: 0, b: 1, strength: 0.6, shared: [] }],
+    galaxies: [
+      { id: 0, name: 'dreamy', hue: 0.11, size: 1 },
+      { id: 1, name: 'tinkering', hue: 0.73, size: 1 },
+    ],
+  };
+}
+
+/** Fails unless each of twoPlanets() shows in its own Galaxy's colour, with their Link between them on a dark sky. */
+async function expectTwoPlanetsDrawn(page: Page) {
+  const canvas = page.locator('canvas');
+  await expect(canvas).toBeVisible();
+  const box = (await canvas.boundingBox())!;
+  const [x, y] = [box.width / 2, box.height / 2];
+  // Rust fits the sky to the canvas's height, which puts each Planet this far from the middle.
+  const across = box.height * 0.37;
+  // The Link is one pixel tall, so look just above and below where it should be too.
+  const onLink = [-2, -1, 0, 1, 2].map((d) => ({ x, y: y + d }));
+  await expect(async () => {
+    const { at } = await readCanvas(page, canvas, [{ x: x - across, y }, { x: x + across, y }, { x: 8, y: 8 }, ...onLink]);
+    const [left, right, corner, ...link] = at;
+    // Not exact, because the light on a Planet is a little warm.
+    expect(Math.abs(hueOf(left) - 0.11), `left Planet is ${left}`).toBeLessThan(0.06);
+    expect(Math.abs(hueOf(right) - 0.73), `right Planet is ${right}`).toBeLessThan(0.06);
+    expect(brightness(left), `left Planet is ${left}`).toBeGreaterThan(100);
+    expect(brightness(right), `right Planet is ${right}`).toBeGreaterThan(100);
+    expect(brightness(corner), `the corner is ${corner}`).toBeLessThan(40);
+    expect(Math.max(...link.map(brightness)), `the Link is ${link}`).toBeGreaterThan(40);
+  }).toPass({ timeout: 15_000 });
+}
+
+test('Planets draw in their Galaxy colours with their Link between them', async ({ page }) => {
+  await installMockIpc(page, withUniverse(twoPlanets()));
+
+  await openUniverse(page);
+
+  await expectTwoPlanetsDrawn(page);
 });
 
 test('three.js loads only on the Universe screen', async ({ page }) => {
@@ -620,13 +685,11 @@ test('the Universe draws under the app CSP', async ({ page }) => {
     const response = await route.fetch();
     await route.fulfill({ response, headers: { ...response.headers(), 'content-security-policy': csp } });
   });
-  await installMockIpc(page, withUniverse());
+  await installMockIpc(page, withUniverse(twoPlanets()));
 
   await openUniverse(page);
 
-  const canvas = page.locator('canvas');
-  await expect(canvas).toBeVisible();
-  await expect.poll(() => distinctColors(page, canvas), { timeout: 15_000 }).toBeGreaterThan(50);
+  await expectTwoPlanetsDrawn(page);
   expect(problems).toEqual([]);
 });
 
