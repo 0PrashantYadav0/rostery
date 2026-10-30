@@ -541,6 +541,7 @@ function universe(): Universe {
   };
 }
 
+const noUniverse: Universe = { filter: 'both', planets: [], links: [], galaxies: [] };
 const withUniverse = (u: Universe = universe()) => ({ ...empty, get_universe: () => u });
 
 async function openUniverse(page: Page) {
@@ -762,7 +763,7 @@ test('a hostile Planet name is only text, and it cannot take over the screen', a
 });
 
 test('an empty Universe says what to do', async ({ page }) => {
-  await installMockIpc(page, withUniverse({ filter: 'both', planets: [], links: [], galaxies: [] }));
+  await installMockIpc(page, withUniverse(noUniverse));
 
   await openUniverse(page);
 
@@ -904,7 +905,65 @@ test('an import keeps going while you look at the Universe', async ({ page }) =>
   await expect(status).toBeInViewport();
 });
 
-test('a file dropped on another screen is not imported out of sight', async ({ page }) => {
+test('the Universe says an import is running and draws the result when it ends', async ({ page }) => {
+  let stored = noUniverse;
+  let finish = () => {};
+  await installMockIpc(page, {
+    ...empty,
+    get_universe: () => stored,
+    'plugin:dialog|open': () => ['/d/my_spotify_data.zip'],
+    import_paths: () =>
+      new Promise((resolve) => {
+        finish = () => {
+          stored = universe();
+          resolve({ ...nothing, filesRead: 1, added: 5 });
+        };
+      }),
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Choose file' }).click();
+  await expect(page.getByRole('status')).toContainText('Reading your history');
+  await page.getByRole('button', { name: 'Universe' }).click();
+
+  await expect(page.getByRole('status')).toContainText('Reading your history');
+  await expect(page.getByText('Nothing to draw yet')).toBeHidden();
+
+  finish();
+  await expect(page.locator('canvas')).toBeVisible();
+  await expect(page.getByText('6 Planets, 5 Links, 2 Galaxies')).toBeVisible();
+  await expect(page.getByRole('status')).toContainText('Click a Planet');
+});
+
+test('an import that fails while you look at the Universe says so there', async ({ page }) => {
+  let fail = () => {};
+  await installMockIpc(page, {
+    ...empty,
+    get_universe: () => noUniverse,
+    'plugin:dialog|open': () => ['/d/notes.json'],
+    import_paths: () =>
+      new Promise((_, reject) => (fail = () => reject(new Error('Rostery did not find a Spotify or YouTube Export there.')))),
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Choose file' }).click();
+  await expect(page.getByRole('status')).toContainText('Reading your history');
+  await page.getByRole('button', { name: 'Universe' }).click();
+  await expect(page.getByRole('status')).toContainText('Reading your history');
+
+  fail();
+  await expect(page.getByRole('alert')).toContainText('did not find a Spotify or YouTube Export');
+  await expect(page.getByText('Nothing to draw yet')).toBeVisible();
+
+  // Sources has it too, so it does not follow the person around after they have been there.
+  await page.getByRole('button', { name: 'Sources' }).click();
+  await expect(page.getByRole('alert')).toContainText('did not find a Spotify or YouTube Export');
+  await page.getByRole('button', { name: 'Universe' }).click();
+  await expect(page.getByText('Nothing to draw yet')).toBeVisible();
+  await expect(page.getByRole('alert')).toBeHidden();
+});
+
+test('a file dropped on another screen opens Sources and imports there', async ({ page }) => {
   const imported: unknown[] = [];
   await installMockIpc(page, {
     ...withUniverse(),
@@ -920,9 +979,11 @@ test('a file dropped on another screen is not imported out of sight', async ({ p
   await expect(page.locator('canvas')).toBeVisible();
 
   await emitEvent(page, 'tauri://drag-drop', { paths: ['/d/first.zip'], position: { x: 9, y: 9 } });
-  await page.getByRole('button', { name: 'Sources' }).click();
 
+  await expect(page.getByRole('button', { name: 'Sources' })).toHaveAttribute('aria-current', 'page');
+  const status = page.getByRole('status');
+  await expect(status).toHaveText('Added 5 Plays.');
+  await expect(status).toBeInViewport();
   await expect(page.locator('.import')).not.toHaveClass(/over/);
-  await expect(page.getByRole('status')).toBeHidden();
-  expect(imported).toEqual([]);
+  expect(imported).toEqual([{ paths: ['/d/first.zip'] }]);
 });

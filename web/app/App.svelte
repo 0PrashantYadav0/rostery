@@ -12,6 +12,16 @@
   ];
 
   let screen = $state('Sources');
+  let importing = $state(false);
+  // Goes up each time Sources finishes changing what is stored, so the Universe draws it again.
+  let stored = $state(0);
+  let missedError = $state('');
+
+  function open(label: string) {
+    screen = label;
+    // Sources shows it too, so it stops following the person once they can go and read it there.
+    missedError = '';
+  }
 </script>
 
 <div class="shell">
@@ -24,7 +34,7 @@
             disabled={!ready}
             aria-current={label === screen ? 'page' : undefined}
             title={ready ? undefined : 'Not available yet'}
-            onclick={() => (screen = label)}
+            onclick={() => open(label)}
           >
             {label}
           </button>
@@ -34,9 +44,17 @@
   </nav>
   <main>
     <!-- Sources stays mounted, so an import keeps its place and its result while you look elsewhere. -->
-    <Sources active={screen === 'Sources'} />
+    <Sources
+      active={screen === 'Sources'}
+      bind:importing
+      onopen={() => open('Sources')}
+      onstored={() => (stored += 1)}
+      onmissederror={(message) => (missedError = message)}
+    />
     {#if screen === 'Universe'}
-      <Universe />
+      {#key stored}
+        <Universe {importing} {missedError} />
+      {/key}
     {/if}
   </main>
 </div>

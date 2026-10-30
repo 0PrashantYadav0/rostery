@@ -5,6 +5,8 @@
   import type { Planet, Universe } from '../../shared/types';
   import type { UniverseHandle } from '../../universe/render';
 
+  let { importing, missedError }: { importing: boolean; missedError: string } = $props();
+
   let host = $state<HTMLElement>();
   let universe = $state.raw<Universe>();
   let picked = $state.raw<Planet>();
@@ -42,6 +44,13 @@
       handle?.destroy();
     };
   });
+
+  const status = $derived.by(() => {
+    if (picked) return `${picked.name}, in the ${universe!.galaxies[picked.galaxy].name} Galaxy`;
+    if (importing) return 'Reading your history. The Universe will update when that finishes.';
+    if (!universe?.planets.length) return 'Nothing to draw yet. Add your history on the Sources screen, or try the demo data there.';
+    return 'Drag to turn. Scroll to zoom. Click a Planet to see its name.';
+  });
 </script>
 
 <div class="screen">
@@ -51,19 +60,14 @@
     {#if universe?.planets.length}
       <p>{describeUniverse(universe)}</p>
     {/if}
+    {#if missedError}
+      <p role="alert">{missedError}</p>
+    {/if}
   </header>
   {#if error}
     <p class="note" role="alert">{error}</p>
-  {:else if universe?.planets.length === 0}
-    <p class="note">Nothing to draw yet. Add your history on the Sources screen, or try the demo data there.</p>
   {:else if universe}
-    <p class="note" role="status">
-      {#if picked}
-        {picked.name}, in the {universe.galaxies[picked.galaxy].name} Galaxy
-      {:else}
-        Drag to turn. Scroll to zoom. Click a Planet to see its name.
-      {/if}
-    </p>
+    <p class="note" role="status">{status}</p>
   {/if}
 </div>
 

@@ -14,7 +14,22 @@
   import { describeImport } from '../../shared/summary';
   import type { Totals } from '../../shared/types';
 
-  let { active }: { active: boolean } = $props();
+  let {
+    active,
+    importing = $bindable(false),
+    onopen,
+    onstored,
+    onmissederror,
+  }: {
+    active: boolean;
+    importing?: boolean;
+    /** A file was dropped on another screen, and its progress and result show here. */
+    onopen: () => void;
+    /** An action has finished, so what is stored may have changed. */
+    onstored: () => void;
+    /** An import failed after the person left, so the alert on this screen is out of their sight. */
+    onmissederror: (message: string) => void;
+  } = $props();
 
   const none = { plays: 0, minutes: 0, creators: 0, firstPlay: null, lastPlay: null };
 
@@ -22,7 +37,6 @@
   let hasDemo = $state(false);
   let loaded = $state(false);
   let busy = $state(false);
-  let importing = $state(false);
   let dragging = $state(false);
   let result = $state('');
   let missedDrop = $state(false);
@@ -51,6 +65,7 @@
       error ||= errorMessage(e);
     }
     busy = false;
+    onstored();
   }
 
   async function runImport(paths: string[]) {
@@ -65,6 +80,7 @@
       result = describeImport(await importPaths(paths));
     });
     importing = false;
+    if (error && !active) onmissederror(error);
   }
 
   async function choose(pick: () => Promise<string[] | null>) {
@@ -88,9 +104,12 @@
     let unlisten: (() => void) | undefined;
     let gone = false;
     onFileDrop((event) => {
-      // On another screen there is no drop zone to show, and an import would run out of sight.
+      // On another screen there is no drop zone to show.
       dragging = active && !busy && (event.type === 'enter' || event.type === 'over');
-      if (active && event.type === 'drop') runImport(event.paths);
+      if (event.type === 'drop') {
+        onopen();
+        runImport(event.paths);
+      }
     })
       .then((stop) => (gone ? stop() : (unlisten = stop)))
       // Outside the desktop app there is nothing to drop onto. Choose file still works.
