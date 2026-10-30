@@ -49,10 +49,7 @@ fn in_view(filter: UniverseFilter, source: Source) -> bool {
     }
 }
 
-/// The heaviest Creators as Planets, with no position or Galaxy yet.
-///
-/// Weight is compared as a share of the heaviest in the same Source. Within one Source that is
-/// plain heaviest first, and in `Both` it keeps a Spotify-heavy person's channels from all being cut.
+/// The heaviest Creators as Planets, heaviest first, with no position or Galaxy yet.
 pub fn planets(input: &UniverseInput, filter: UniverseFilter) -> Vec<Planet> {
     let mut tallies: HashMap<(Source, &str), Tally> = HashMap::new();
     let named = |creator: &str| !creator.trim().is_empty();
@@ -99,28 +96,27 @@ pub fn planets(input: &UniverseInput, filter: UniverseFilter) -> Vec<Planet> {
     }
 
     let minutes = |t: &Tally| t.ms as f64 / 60_000.0;
-    let mut heaviest: HashMap<Source, f64> = HashMap::new();
-    for ((source, _), t) in &tallies {
-        let weight = minutes(t) + t.affinity;
-        let max = heaviest.entry(*source).or_default();
-        *max = max.max(weight);
-    }
-    // With no weight at all there is nothing to compare, so every Planet is the smallest size.
-    let share = |source: &Source, t: &Tally| match heaviest[source] {
-        0.0 => 0.0,
-        max => (minutes(t) + t.affinity) / max,
-    };
     let mut ranked: Vec<(f64, (Source, &str), Tally)> = tallies
         .into_iter()
-        .map(|(key, t)| (share(&key.0, &t), key, t))
+        .map(|(key, t)| (minutes(&t) + t.affinity, key, t))
         .collect();
     ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    ranked.truncate(MAX_PLANETS);
+    keep_within_cap(&mut ranked);
+
+    let mut heaviest: HashMap<Source, f64> = HashMap::new();
+    for (weight, (source, _), _) in &ranked {
+        heaviest.entry(*source).or_insert(*weight);
+    }
 
     ranked
         .into_iter()
         .enumerate()
-        .map(|(id, (share, (source, name), t))| {
+        .map(|(id, (weight, (source, name), t))| {
+            // With no weight at all there is nothing to compare, so every Planet is the smallest size.
+            let share = match heaviest[&source] {
+                0.0 => 0.0,
+                max => weight / max,
+            };
             let mut interests = input
                 .interests
                 .get(&(source, name.to_string()))
@@ -143,6 +139,26 @@ pub fn planets(input: &UniverseInput, filter: UniverseFilter) -> Vec<Planet> {
             }
         })
         .collect()
+}
+
+/// `ranked` is heaviest first. A Source gets half the places, plus any the other leaves empty, so
+/// each Source's heaviest are the ones kept and neither can push the other out of a combined view.
+///
+/// ponytail: a light Source still gets its half, so 74 one-watch channels can hold places a heavier
+/// artist would fill. Lower the half to a smaller reserve if real histories show that happening.
+fn keep_within_cap<T>(ranked: &mut Vec<(f64, (Source, &str), T)>) {
+    let total = ranked.len();
+    let mut in_source: HashMap<Source, usize> = HashMap::new();
+    for (_, (source, _), _) in ranked.iter() {
+        *in_source.entry(*source).or_default() += 1;
+    }
+    let places = |source: &Source| MAX_PLANETS - (total - in_source[source]).min(MAX_PLANETS / 2);
+    let mut kept: HashMap<Source, usize> = HashMap::new();
+    ranked.retain(|(_, (source, _), _)| {
+        let so_far = kept.entry(*source).or_default();
+        *so_far += 1;
+        *so_far <= places(source)
+    });
 }
 
 fn top_items(items: HashMap<&str, ItemTally>) -> Vec<TopItem> {
@@ -909,7 +925,7 @@ mod tests {
 
     #[test]
     fn the_cap_in_both_keeps_both_sources() {
-        // Every Spotify Creator outweighs every channel, so a cap on raw weight would keep no channel.
+        // Every Spotify Creator outweighs every channel, so one list by weight would keep no channel.
         let mut plays: Vec<_> = (0..200)
             .map(|i| spotify(&format!("Artist {i:03}"), i * DAY, 500 + 100_000 / (i + 1)))
             .collect();
@@ -924,6 +940,79 @@ mod tests {
         assert_eq!(channels.count(), 40);
         assert!(close(planet(&u, "Channel 000").radius, 4.0));
         assert!(close(planet(&u, "Artist 000").radius, 4.0));
+    }
+
+    fn in_source(u: &Universe, source: Source) -> usize {
+        u.planets.iter().filter(|p| p.source == source).count()
+    }
+
+    #[test]
+    fn the_cap_in_both_cannot_cut_nearly_every_artist() {
+        // One watch each is the whole of a light history, and must not outrank months of listening.
+        let mut plays: Vec<_> = (0..200)
+            .map(|i| {
+                let minutes = if i == 0 { 100_000 } else { 40_000 - i };
+                spotify(&format!("Artist {i:03}"), i * DAY, minutes)
+            })
+            .collect();
+        plays.extend((0..200).map(|i| youtube(&format!("Channel {i:03}"), (1000 + i) * DAY)));
+        // Its name sorts past the cut, so only its second watch can keep it.
+        plays.push(youtube("Channel 199", 2000 * DAY));
+        let u = from_plays(&plays, Both);
+        assert_eq!(u.planets.len(), 150);
+        assert_eq!(in_source(&u, Source::Spotify), 75);
+        assert_eq!(in_source(&u, Source::Youtube), 75);
+        assert!(u.planets.iter().any(|p| p.name == "Artist 074"));
+        assert!(!u.planets.iter().any(|p| p.name == "Artist 075"));
+        assert!(u.planets.iter().any(|p| p.name == "Channel 199"));
+    }
+
+    #[test]
+    fn places_a_source_leaves_empty_go_to_the_other() {
+        let artists = |n: i64| -> Vec<Play> {
+            (0..n)
+                .map(|i| spotify(&format!("Artist {i:03}"), i * DAY, 1000 - i))
+                .collect()
+        };
+        let channels = |n: i64| -> Vec<Play> {
+            (0..n)
+                .map(|i| youtube(&format!("Channel {i:03}"), (1000 + i) * DAY))
+                .collect()
+        };
+        let both = |a: i64, c: i64| {
+            let u = from_plays(&[artists(a), channels(c)].concat(), Both);
+            (
+                in_source(&u, Source::Spotify),
+                in_source(&u, Source::Youtube),
+            )
+        };
+        assert_eq!(both(200, 40), (110, 40));
+        assert_eq!(both(40, 200), (40, 110));
+        assert_eq!(both(60, 60), (60, 60));
+        assert_eq!(both(200, 200), (75, 75));
+    }
+
+    #[test]
+    fn ids_in_both_run_by_real_weight_and_the_heaviest_names_its_galaxy() {
+        // 16 minutes is all of Small Channel's Source, and 40,000 is under half of Big Artist's.
+        let plays = [
+            spotify("Top Artist", 0, 100_000),
+            spotify("Big Artist", DAY, 20_000),
+            youtube("Small Channel", DAY + 60),
+            spotify("Big Artist", 2 * DAY, 20_000),
+            youtube("Small Channel", 2 * DAY + 60),
+        ];
+        let u = from_plays(&plays, Both);
+        let names: Vec<_> = u.planets.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["Top Artist", "Big Artist", "Small Channel"]);
+        assert!(
+            close(planet(&u, "Small Channel").radius, 4.0),
+            "sizes stay per Source"
+        );
+
+        let small = planet(&u, "Small Channel");
+        assert_eq!(small.galaxy, planet(&u, "Big Artist").galaxy);
+        assert_eq!(u.galaxies[small.galaxy as usize].name, "Big Artist");
     }
 
     #[test]
