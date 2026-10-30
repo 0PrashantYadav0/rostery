@@ -79,18 +79,25 @@
     inset: 0;
   }
 
-  /* Words sit over the picture, so they must not catch the drag that turns it, and a Planet can pass behind them. */
+  /*
+   * Words sit over the picture, so they must not catch the drag that turns it. A Planet can pass behind them in
+   * any colour, so they have a solid backing. The left and top offsets line the words up with the other screens.
+   */
   header,
   .note {
     position: absolute;
-    left: 48px;
-    right: 48px;
+    left: 33px;
+    max-width: calc(100% - 66px);
+    padding: 10px 14px;
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    background: var(--panel);
+    overflow-wrap: anywhere;
     pointer-events: none;
-    text-shadow: 0 0 6px var(--night), 0 0 2px var(--night);
   }
 
   header {
-    top: 40px;
+    top: 25px;
   }
 
   h1 {
@@ -105,23 +112,29 @@
   }
 
   .note {
-    bottom: 28px;
+    bottom: 13px;
     margin: 0;
     color: var(--dim);
-    overflow-wrap: anywhere;
     /* A name comes from a file and can be any length, so this keeps it to 4 lines. */
-    max-height: 6em;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 4;
+    line-clamp: 4;
     overflow: hidden;
+  }
+
+  [role='alert'] {
+    color: #f08a7e;
   }
 
   @media (max-width: 720px) {
     header,
     .note {
-      left: 24px;
-      right: 24px;
+      left: 9px;
+      max-width: calc(100% - 18px);
     }
     header {
-      top: 24px;
+      top: 9px;
     }
   }
 </style>

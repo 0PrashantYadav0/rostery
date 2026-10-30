@@ -830,6 +830,32 @@ test('when the drawing context is lost the screen says so, and it draws again wh
   await expectTwoPlanetsDrawn(page);
 });
 
+test('the words stay readable with a Planet behind them', async ({ page }) => {
+  await page.setViewportSize({ width: 640, height: 480 });
+  await installMockIpc(page, withUniverse(onePlanet()));
+  await openUniverse(page);
+  await expect(page.locator('canvas')).toBeVisible();
+
+  const luminance = (css: string) => {
+    const { r, g, b } = new Color(css);
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  for (const text of [
+    page.getByRole('heading', { name: 'Universe' }),
+    page.getByText('1 Planet, 0 Links, 1 Galaxy'),
+    page.getByRole('status'),
+  ]) {
+    const { color, backing } = await text.evaluate((node) => ({
+      color: getComputedStyle(node).color,
+      backing: getComputedStyle(node.closest('header, .note')!).backgroundColor,
+    }));
+    // Solid, because anything the picture shows through would change the contrast from one frame to the next.
+    expect(backing).toMatch(/^rgb\(/);
+    const [light, dark] = [luminance(color), luminance(backing)].sort((a, b) => b - a);
+    expect((light + 0.05) / (dark + 0.05)).toBeGreaterThanOrEqual(4.5);
+  }
+});
+
 test('leaving the Universe frees its drawing context and coming back asks for fresh data', async ({ page }) => {
   let asked = 0;
   await installMockIpc(page, {
