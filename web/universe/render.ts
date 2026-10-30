@@ -29,8 +29,13 @@ export interface UniverseHandle {
   setUniverse(universe: Universe): void;
   /** `callback` gets the `id` of the Planet someone clicked. */
   onSelect(callback: (planetId: number) => void): void;
+  /** `callback` gets true when the browser takes the drawing context away, and false if it gives it back. */
+  onContextChange(callback: (lost: boolean) => void): void;
   destroy(): void;
 }
+
+/** Thrown where this computer cannot start WebGL, so a screen can tell that apart from a bug. */
+export class NoWebGL extends Error {}
 
 const FIELD_OF_VIEW = 45;
 const STARS = 1600;
@@ -94,8 +99,12 @@ function drawing(universe: Universe, middle: Vector3, radius: number) {
 }
 
 export function mountUniverse(container: HTMLElement, first: Universe): UniverseHandle {
-  // Throws where WebGL is missing, so the screen can say so.
-  const renderer = new WebGLRenderer({ antialias: true, alpha: true });
+  let renderer: WebGLRenderer;
+  try {
+    renderer = new WebGLRenderer({ antialias: true, alpha: true });
+  } catch (e) {
+    throw new NoWebGL(String(e));
+  }
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.domElement.style.display = 'block';
   container.append(renderer.domElement);
@@ -178,6 +187,16 @@ export function mountUniverse(container: HTMLElement, first: Universe): Universe
   canvas.addEventListener('pointerdown', onDown);
   canvas.addEventListener('pointerup', onUp);
 
+  let contextChange: ((lost: boolean) => void) | undefined;
+  const onContextLost = () => contextChange?.(true);
+  // three.js restores its own state first, but this only draws when asked, so the sky stays empty until then.
+  const onContextRestored = () => {
+    render();
+    contextChange?.(false);
+  };
+  canvas.addEventListener('webglcontextlost', onContextLost);
+  canvas.addEventListener('webglcontextrestored', onContextRestored);
+
   const resize = new ResizeObserver(() => {
     fitToWindow();
     render();
@@ -189,10 +208,13 @@ export function mountUniverse(container: HTMLElement, first: Universe): Universe
   return {
     setUniverse,
     onSelect: (callback) => (select = callback),
+    onContextChange: (callback) => (contextChange = callback),
     destroy() {
       resize.disconnect();
       canvas.removeEventListener('pointerdown', onDown);
       canvas.removeEventListener('pointerup', onUp);
+      canvas.removeEventListener('webglcontextlost', onContextLost);
+      canvas.removeEventListener('webglcontextrestored', onContextRestored);
       controls.dispose();
       release();
       renderer.dispose();

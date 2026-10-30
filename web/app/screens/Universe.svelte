@@ -18,15 +18,24 @@
       universe = u;
       if (!u.planets.length) return;
       // A dynamic import, so three.js only loads for someone who opens this screen.
-      const { mountUniverse } = await import('../../universe/render');
+      const { mountUniverse, NoWebGL } = await import('../../universe/render');
       if (gone) return;
       try {
         handle = mountUniverse(host!, u);
-      } catch {
-        error = 'This computer could not start 3D drawing, so Rostery cannot show the Universe here.';
+      } catch (e) {
+        console.error(e);
+        error =
+          e instanceof NoWebGL
+            ? 'This computer could not start 3D drawing, so Rostery cannot show the Universe here. Update your graphics driver or restart this computer, then open this screen again.'
+            : 'Rostery could not draw your Universe. Close Rostery, open it again, then come back to this screen.';
         return;
       }
       handle.onSelect((id) => (picked = u.planets.find((p) => p.id === id)));
+      handle.onContextChange((lost) => {
+        error = lost
+          ? 'Rostery lost its 3D drawing, which can happen when a graphics driver restarts. If the picture does not come back by itself, open another screen and come back to this one.'
+          : '';
+      });
     })().catch((e) => (error = errorMessage(e)));
     return () => {
       gone = true;

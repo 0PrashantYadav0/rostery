@@ -783,7 +783,7 @@ test('a Universe that cannot load shows why', async ({ page }) => {
   await expect(page.getByRole('alert')).toContainText('could not use its local database');
 });
 
-test('with no WebGL the screen says so and the Planet count still shows', async ({ page }) => {
+test('with no WebGL the screen says what to do and the Planet count still shows', async ({ page }) => {
   await page.addInitScript(() => {
     const real = HTMLCanvasElement.prototype.getContext as any;
     HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement, kind: string, ...rest: unknown[]) {
@@ -795,7 +795,39 @@ test('with no WebGL the screen says so and the Planet count still shows', async 
   await openUniverse(page);
 
   await expect(page.getByRole('alert')).toContainText('could not start 3D drawing');
+  await expect(page.getByRole('alert')).toContainText('Update your graphics driver or restart this computer');
   await expect(page.getByText('6 Planets, 5 Links, 2 Galaxies')).toBeVisible();
+});
+
+test('a failure while drawing is not blamed on the computer', async ({ page }) => {
+  const broken = universe();
+  broken.links.push({ a: 0, b: 99, strength: 0.5, shared: [] });
+  await installMockIpc(page, withUniverse(broken));
+
+  await openUniverse(page);
+
+  await expect(page.getByRole('alert')).toContainText('Rostery could not draw your Universe');
+  await expect(page.getByRole('alert')).toContainText('Close Rostery');
+  await expect(page.getByRole('alert')).not.toContainText('3D drawing');
+});
+
+test('when the drawing context is lost the screen says so, and it draws again when it comes back', async ({ page }) => {
+  await installMockIpc(page, withUniverse(twoPlanets()));
+  await openUniverse(page);
+  await expectTwoPlanetsDrawn(page);
+  const lose = await page
+    .locator('canvas')
+    .evaluateHandle((canvas: HTMLCanvasElement) => canvas.getContext('webgl2')!.getExtension('WEBGL_lose_context')!);
+
+  await lose.evaluate((extension) => extension.loseContext());
+  // If it never comes back, this is what stays on screen.
+  await expect(page.getByRole('alert')).toContainText('lost its 3D drawing');
+  await expect(page.getByRole('alert')).toContainText('open another screen and come back');
+
+  await lose.evaluate((extension) => extension.restoreContext());
+  await expect(page.getByRole('alert')).toBeHidden();
+  await expect(page.getByRole('status')).toContainText('Click a Planet');
+  await expectTwoPlanetsDrawn(page);
 });
 
 test('leaving the Universe frees its drawing context and coming back asks for fresh data', async ({ page }) => {
