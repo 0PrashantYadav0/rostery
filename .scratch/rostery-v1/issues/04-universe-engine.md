@@ -4,11 +4,11 @@
 
 **Blocked by:** 01
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] The most played Creator has the largest Planet, and size follows the square root of time
-- [ ] Creators that share Sessions or Interests are linked, and one coincidental Session is not enough
-- [ ] Linked Planets form Galaxies
-- [ ] Planets never overlap and positions are never `NaN`, even with one Play or none
-- [ ] The Universe for 300,000 Plays builds in under 3 seconds in a release build
-- [ ] The Universe screen draws a real 3D scene from this data
+- [x] The most played Creator has the largest Planet, and size follows the square root of time
+- [x] Creators that share Sessions or Interests are linked, and one coincidental Session is not enough
+- [x] Linked Planets form Galaxies
+- [x] Planets never overlap and positions are never `NaN`, even with one Play or none
+- [x] The Universe for 300,000 Plays builds in under 3 seconds in a release build
+- [x] The Universe screen draws a real 3D scene from this data

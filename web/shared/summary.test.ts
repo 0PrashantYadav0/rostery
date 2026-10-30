@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { describeImport } from './summary';
-import type { ImportSummary } from './types';
+import { describeImport, describeUniverse } from './summary';
+import type { ImportSummary, Universe } from './types';
 
 const noImport: ImportSummary = {
   filesRead: 0,
@@ -46,5 +46,18 @@ describe('describeImport', () => {
 
   it('reports a repeat import as nothing new', () => {
     expect(describeImport({ ...noImport, duplicates: 300 })).toBe('Added 0 Plays. 300 Plays were already here.');
+  });
+});
+
+describe('describeUniverse', () => {
+  const sized = (planets: number, links: number, galaxies: number) =>
+    ({ planets: Array(planets), links: Array(links), galaxies: Array(galaxies) }) as unknown as Universe;
+
+  it('counts each kind of thing', () => {
+    expect(describeUniverse(sized(1500, 2, 3))).toBe('1,500 Planets, 2 Links, 3 Galaxies');
+  });
+
+  it('has a singular for each word', () => {
+    expect(describeUniverse(sized(1, 1, 1))).toBe('1 Planet, 1 Link, 1 Galaxy');
   });
 });

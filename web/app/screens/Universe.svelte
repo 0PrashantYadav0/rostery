@@ -100,6 +100,9 @@
     margin: 0;
     color: var(--dim);
     overflow-wrap: anywhere;
+    /* A name comes from a file and can be any length, so this keeps it to 4 lines. */
+    max-height: 6em;
+    overflow: hidden;
   }
 
   @media (max-width: 720px) {

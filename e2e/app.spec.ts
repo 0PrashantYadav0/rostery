@@ -677,6 +677,27 @@ test('dragging turns the Universe and does not pick a Planet', async ({ page }) 
   await expect(page.getByRole('status')).toContainText('Click a Planet');
 });
 
+test('a hostile Planet name is only text, and it cannot take over the screen', async ({ page }) => {
+  await page.setViewportSize({ width: 1000, height: 700 });
+  const hostile = onePlanet();
+  hostile.planets[0].name = `</script><img src=x onerror="window.ran = 1">${'long '.repeat(2000)}`;
+  await installMockIpc(page, withUniverse(hostile));
+
+  await openUniverse(page);
+  const canvas = page.locator('canvas');
+  await expect(canvas).toBeVisible();
+  const box = (await canvas.boundingBox())!;
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+
+  const status = page.getByRole('status');
+  await expect(status).toContainText('</script><img src=x');
+  await expect(page.locator('main img')).toHaveCount(0);
+  expect(await page.evaluate(() => (window as any).ran)).toBeUndefined();
+  expect((await status.boundingBox())!.height).toBeLessThan(box.height / 4);
+  const sideways = await page.evaluate(() => document.querySelector('main')!.scrollWidth - document.querySelector('main')!.clientWidth);
+  expect(sideways).toBeLessThanOrEqual(0);
+});
+
 test('an empty Universe says what to do', async ({ page }) => {
   await installMockIpc(page, withUniverse({ filter: 'both', planets: [], links: [], galaxies: [] }));
 

@@ -160,7 +160,7 @@ fn top_items(items: HashMap<&str, ItemTally>) -> Vec<TopItem> {
 }
 
 // These strings came from untrusted files, and a page will open what these return. So each one is
-// rebuilt from a checked ID, and can only ever be an https link to the Source itself.
+// rebuilt from a checked ID, and can only ever be an https URL on the Source's own host.
 
 fn creator_url(source: Source, reference: &str) -> Option<String> {
     let checked = |prefix| {
@@ -191,8 +191,8 @@ fn item_url(source: Source, reference: &str) -> Option<String> {
     }
 }
 
-/// An Export names an artist with no ID, so the way back to Spotify is a search for the name.
-/// YouTube's own search page is not a page about the Creator, so a channel gets no fallback.
+/// An Export names an artist with no ID, so the way back to Spotify is a search for the name. A
+/// YouTube search is not a page about the Creator, so a channel with no URL stays without one.
 fn search_url(source: Source, name: &str) -> Option<String> {
     if source != Source::Spotify {
         return None;
@@ -951,7 +951,7 @@ mod tests {
     }
 
     #[test]
-    fn a_planet_links_back_to_its_source() {
+    fn planet_url_goes_back_to_its_source() {
         let mut artist = spotify("Moth Season", 0, 3);
         artist.creator_ref = Some("spotify:artist:4Z8W4fKeB5YxbusRsdQVPb".into());
         let mut channel = youtube("Cache Miss", DAY);
@@ -984,7 +984,7 @@ mod tests {
     }
 
     #[test]
-    fn a_ref_from_an_affinity_is_a_link_too() {
+    fn a_ref_from_an_affinity_gives_a_url_too() {
         let mut a = affinity(Source::Spotify, "Moth Season", "top_artist", 5.0);
         a.creator_ref = Some("spotify:artist:abc".into());
         let u = with_affinities(&[spotify("Moth Season", 0, 3)], &[a], Spotify);
@@ -995,7 +995,7 @@ mod tests {
     }
 
     #[test]
-    fn a_hostile_ref_never_becomes_a_link() {
+    fn a_hostile_ref_never_becomes_a_url() {
         let hostile = [
             "javascript:alert(1)",
             "data:text/html,<script>alert(1)</script>",
