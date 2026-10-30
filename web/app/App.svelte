@@ -44,7 +44,8 @@
 <style>
   .shell {
     display: grid;
-    grid-template-columns: 176px 1fr;
+    /* minmax(0, ...), because a plain 1fr grows to fit its content and the whole app then scrolls sideways. */
+    grid-template-columns: 176px minmax(0, 1fr);
     height: 100%;
   }
 
@@ -88,6 +89,11 @@
     cursor: pointer;
   }
 
+  /* Inside the button, because the window's edge and the narrow layout's scrolling list clip anything outside. */
+  button:focus-visible {
+    outline-offset: -2px;
+  }
+
   button[aria-current='page']::before {
     content: '';
     position: absolute;
@@ -110,8 +116,8 @@
 
   @media (max-width: 720px) {
     .shell {
-      grid-template-columns: 1fr;
-      grid-template-rows: auto 1fr;
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: auto minmax(0, 1fr);
     }
     nav {
       padding: 14px 0 0;

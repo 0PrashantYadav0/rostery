@@ -439,6 +439,68 @@ test('clearing demo data hands focus to the button that is left', async ({ page 
 
 const tauriConfig = JSON.parse(readFileSync('src-tauri/tauri.conf.json', 'utf8'));
 
+test('the demo result is on screen at the default window size', async ({ page }) => {
+  const { width, height } = tauriConfig.app.windows[0];
+  await page.setViewportSize({ width, height });
+  let stored: Totals = { spotify: none, youtube: none };
+  await installMockIpc(page, {
+    totals: () => stored,
+    has_demo_data: () => false,
+    load_demo: () => {
+      stored = {
+        spotify: { plays: 1234, minutes: 4321, creators: 30, firstPlay: 1_790_000_000, lastPlay: 1_799_000_000 },
+        youtube: { plays: 987, minutes: 0, creators: 30, firstPlay: 1_790_000_000, lastPlay: 1_799_000_000 },
+      };
+      return stored;
+    },
+  });
+
+  await page.goto('/');
+  // A real click, because it scrolls to the button first the way a person has to.
+  await page.getByRole('button', { name: 'Try demo data' }).click();
+
+  await expect(page.getByRole('region', { name: 'Spotify' }).getByText('1,234', { exact: true })).toBeInViewport();
+  await expect(page.getByRole('region', { name: 'YouTube' }).getByText('987', { exact: true })).toBeInViewport();
+});
+
+test('the app never scrolls sideways, down to the smallest window and past it', async ({ page }) => {
+  const { minWidth, minHeight } = tauriConfig.app.windows[0];
+  expect(minWidth).toBeGreaterThanOrEqual(419);
+  expect(minHeight).toBeGreaterThan(0);
+  await installMockIpc(page, empty);
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Add your history' })).toBeVisible();
+
+  for (const width of [320, 360, 419, minWidth, 720, 721, 1200]) {
+    await page.setViewportSize({ width, height: minHeight });
+    const overflow = await page.evaluate(() => ({
+      page: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      main: document.querySelector('main')!.scrollWidth - document.querySelector('main')!.clientWidth,
+    }));
+    expect(overflow.page, `the page scrolls sideways at ${width}px`).toBeLessThanOrEqual(0);
+    expect(overflow.main, `main scrolls sideways at ${width}px`).toBeLessThanOrEqual(0);
+  }
+});
+
+test('the nav focus ring is never clipped', async ({ page }) => {
+  await installMockIpc(page, empty);
+  await page.goto('/');
+
+  for (const width of [500, 1200]) {
+    await page.setViewportSize({ width, height: 700 });
+    const clipped = await page.getByRole('button', { name: 'Sources' }).evaluate((button: HTMLElement) => {
+      button.focus();
+      const { outlineWidth, outlineOffset } = getComputedStyle(button);
+      const reach = parseFloat(outlineWidth) + parseFloat(outlineOffset);
+      const ring = button.getBoundingClientRect();
+      // The list scrolls in the narrow layout, and the window's edge clips everything.
+      const box = button.closest('ul')!.getBoundingClientRect();
+      return Math.max(box.left - (ring.left - reach), box.top - (ring.top - reach), ring.bottom + reach - box.bottom, 0);
+    });
+    expect(clipped, `the focus ring is clipped by ${clipped}px at ${width}px`).toBe(0);
+  }
+});
+
 /** A small sky: two Galaxies of linked Planets, sized and placed the way Rust would. */
 function universe(): Universe {
   const planet = (id: number, name: string, galaxy: number, radius: number, position: [number, number, number]): Planet => ({

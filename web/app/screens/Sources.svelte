@@ -144,6 +144,17 @@
     <p>Your Spotify and YouTube history, stored on this computer.</p>
   </header>
 
+  <!-- Above the dials, because they are what this button changes, and they have to be on screen when it does. -->
+  <div class="actions">
+    <button class:primary={loaded && all === 0} bind:this={tryDemo} onclick={() => run(loadDemo)} aria-disabled={busy}>Try demo data</button>
+    {#if hasDemo}
+      <button onclick={clearDemoData} aria-disabled={busy}>Clear demo data</button>
+    {/if}
+    {#if loaded && all === 0}
+      <p>Nothing here yet. Demo data is made-up history, so you can look around first.</p>
+    {/if}
+  </div>
+
   <div class="dials">
     {#each dials as { key, name, t, share }}
       <section class={key} aria-labelledby="{key}-name">
@@ -228,15 +239,6 @@
     </div>
   </div>
 
-  <div class="actions">
-    <button class="primary" bind:this={tryDemo} onclick={() => run(loadDemo)} aria-disabled={busy}>Try demo data</button>
-    {#if hasDemo}
-      <button onclick={clearDemoData} aria-disabled={busy}>Clear demo data</button>
-    {/if}
-    {#if loaded && all === 0}
-      <p>Nothing here yet. Demo data is made-up history, so you can look around first.</p>
-    {/if}
-  </div>
 </div>
 
 <style>
@@ -257,9 +259,9 @@
 
   .dials {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr));
     gap: 24px;
-    margin-top: 36px;
+    margin-top: 28px;
   }
 
   section {
@@ -359,7 +361,7 @@
 
   .import {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr));
     gap: 28px;
     margin-top: 24px;
     padding: 24px;
@@ -462,7 +464,7 @@
     flex-wrap: wrap;
     align-items: center;
     gap: 12px;
-    margin-top: 28px;
+    margin-top: 20px;
   }
 
   .actions p {
@@ -492,6 +494,24 @@
   button[aria-disabled='true'] {
     opacity: 0.5;
     cursor: default;
+  }
+
+  @media (max-width: 720px) {
+    .screen {
+      padding: 24px;
+    }
+    .dials {
+      gap: 16px;
+    }
+    .import {
+      padding: 16px;
+    }
+    section {
+      padding: 16px;
+    }
+    .drop {
+      padding: 16px;
+    }
   }
 
   @media (prefers-reduced-motion: reduce) {
