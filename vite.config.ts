@@ -7,6 +7,7 @@ export default defineConfig({
   clearScreen: false,
   server: { port: 5173, strictPort: true },
   preview: { port: 4173, strictPort: true },
-  build: { outDir: '../../dist/app', emptyOutDir: true },
+  // The largest chunk is three.js, which only the Universe screen loads.
+  build: { outDir: '../../dist/app', emptyOutDir: true, chunkSizeWarningLimit: 600 },
   test: { dir: `${import.meta.dirname}/web`, include: ['**/*.test.ts'], passWithNoTests: true },
 });

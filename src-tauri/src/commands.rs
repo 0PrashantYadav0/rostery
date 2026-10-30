@@ -1,4 +1,12 @@
-use rostery_core::{demo, ingest::ImportSummary, model::Totals, store::Store, Error};
+use rostery_core::{
+    demo,
+    ingest::ImportSummary,
+    model::Totals,
+    store::Store,
+    universe::{self, Universe, UniverseFilter, UniverseInput},
+    Error,
+};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
@@ -46,4 +54,18 @@ pub fn import_paths(
 ) -> Result<ImportSummary, Error> {
     let mut store = Store::open(&state.db_path)?;
     rostery_core::ingest::import_paths(&mut store, &paths)
+}
+
+#[tauri::command(async)]
+pub fn get_universe(state: State<'_, AppState>, filter: UniverseFilter) -> Result<Universe, Error> {
+    let store = Store::open(&state.db_path)?;
+    Ok(universe::build(
+        &UniverseInput {
+            plays: &store.plays(None)?,
+            affinities: &store.affinities()?,
+            interests: &store.interests()?,
+            galaxy_names: &HashMap::new(),
+        },
+        filter,
+    ))
 }

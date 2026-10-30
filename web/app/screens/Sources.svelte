@@ -4,6 +4,7 @@
     chooseExport,
     chooseFolder,
     clearDemo,
+    errorMessage,
     hasDemoData,
     importPaths,
     loadDemo,
@@ -12,6 +13,8 @@
   } from '../../shared/api';
   import { describeImport } from '../../shared/summary';
   import type { Totals } from '../../shared/types';
+
+  let { active }: { active: boolean } = $props();
 
   const none = { plays: 0, minutes: 0, creators: 0, firstPlay: null, lastPlay: null };
 
@@ -27,9 +30,6 @@
   let dropZone = $state<HTMLElement>();
   let tryDemo = $state<HTMLElement>();
 
-  // The Rust side sends its message as a string. Anything else is a real Error.
-  const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
-
   async function refresh() {
     [totals, hasDemo] = await Promise.all([fetchTotals(), hasDemoData()]);
     loaded = true;
@@ -43,12 +43,12 @@
     try {
       await action();
     } catch (e) {
-      error = message(e);
+      error = errorMessage(e);
     }
     try {
       await refresh();
     } catch (e) {
-      error ||= message(e);
+      error ||= errorMessage(e);
     }
     busy = false;
   }
@@ -73,7 +73,7 @@
       const picked = await pick();
       if (picked?.length) await runImport(picked);
     } catch (e) {
-      error = message(e);
+      error = errorMessage(e);
     }
   }
 
@@ -84,12 +84,13 @@
   }
 
   onMount(() => {
-    refresh().catch((e) => (error = message(e)));
+    refresh().catch((e) => (error = errorMessage(e)));
     let unlisten: (() => void) | undefined;
     let gone = false;
     onFileDrop((event) => {
-      dragging = !busy && (event.type === 'enter' || event.type === 'over');
-      if (event.type === 'drop') runImport(event.paths);
+      // On another screen there is no drop zone to show, and an import would run out of sight.
+      dragging = active && !busy && (event.type === 'enter' || event.type === 'over');
+      if (active && event.type === 'drop') runImport(event.paths);
     })
       .then((stop) => (gone ? stop() : (unlisten = stop)))
       // Outside the desktop app there is nothing to drop onto. Choose file still works.
@@ -109,9 +110,10 @@
     return `${line} ${note}`.trim();
   });
 
-  // The panel sits under the dials, so without this a message can land off screen.
+  // The panel sits under the dials, so without this a message can land off screen. That includes one
+  // that came in on another screen.
   $effect(() => {
-    if ([dragging, importing, status, error].some(Boolean)) dropZone?.scrollIntoView({ block: 'nearest' });
+    if (active && [dragging, importing, status, error].some(Boolean)) dropZone?.scrollIntoView({ block: 'nearest' });
   });
 
   const all = $derived(totals.spotify.plays + totals.youtube.plays);
@@ -136,7 +138,7 @@
         });
 </script>
 
-<div class="screen">
+<div class="screen" hidden={!active}>
   <header>
     <h1>Sources</h1>
     <p>Your Spotify and YouTube history, stored on this computer.</p>

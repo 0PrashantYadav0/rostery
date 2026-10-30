@@ -17,7 +17,8 @@ fn main() {
             commands::load_demo,
             commands::clear_demo,
             commands::has_demo_data,
-            commands::import_paths
+            commands::import_paths,
+            commands::get_universe
         ])
         .run(tauri::generate_context!())
         .expect("Rostery could not start");

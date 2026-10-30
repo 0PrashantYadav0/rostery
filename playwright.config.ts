@@ -9,5 +9,8 @@ export default defineConfig({
     reuseExistingServer: !process.env.CI,
   },
   use: { baseURL: 'http://localhost:4173' },
-  projects: [{ name: 'chromium', use: { browserName: 'chromium' } }],
+  // Software WebGL, so the Universe draws on a machine with no GPU.
+  projects: [
+    { name: 'chromium', use: { browserName: 'chromium', launchOptions: { args: ['--use-angle=swiftshader'] } } },
+  ],
 });

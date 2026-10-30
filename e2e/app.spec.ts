@@ -1,6 +1,7 @@
-import { expect, test, type Page } from '@playwright/test';
+import { readFileSync } from 'node:fs';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 import { emitEvent, installMockIpc } from './mock-ipc';
-import type { ImportSummary, SourceTotals, Totals } from '../web/shared/types';
+import type { ImportSummary, Planet, SourceTotals, Totals, Universe } from '../web/shared/types';
 
 const none: SourceTotals = { plays: 0, minutes: 0, creators: 0, firstPlay: null, lastPlay: null };
 
@@ -434,4 +435,290 @@ test('clearing demo data hands focus to the button that is left', async ({ page 
 
   await expect(clear).toBeHidden();
   await expect(page.getByRole('button', { name: 'Try demo data' })).toBeFocused();
+});
+
+const tauriConfig = JSON.parse(readFileSync('src-tauri/tauri.conf.json', 'utf8'));
+
+/** A small sky: two Galaxies of linked Planets, sized and placed the way Rust would. */
+function universe(): Universe {
+  const planet = (id: number, name: string, galaxy: number, radius: number, position: [number, number, number]): Planet => ({
+    id,
+    name,
+    source: id % 2 ? 'youtube' : 'spotify',
+    minutes: radius * 100,
+    plays: id + 1,
+    radius,
+    position,
+    galaxy,
+    interests: [],
+    url: null,
+    topItems: [],
+  });
+  return {
+    filter: 'both',
+    planets: [
+      planet(0, 'Moth Season', 0, 4, [-14, 2, 0]),
+      planet(1, 'Tape Hiss TV', 0, 2.6, [-22, 7, 3]),
+      planet(2, 'Velvet Anchor', 0, 1.8, [-8, 10, -4]),
+      planet(3, 'Cache Miss', 1, 3.4, [14, -3, 2]),
+      planet(4, 'Binary Tide', 1, 2.2, [22, 3, -3]),
+      planet(5, 'Tiny Compilers', 1, 1.2, [10, -11, 5]),
+    ],
+    links: [
+      { a: 0, b: 1, strength: 0.6, shared: [] },
+      { a: 0, b: 2, strength: 0.4, shared: ['dreamy'] },
+      { a: 3, b: 4, strength: 0.5, shared: [] },
+      { a: 3, b: 5, strength: 0.3, shared: [] },
+      { a: 2, b: 4, strength: 0.13, shared: [] },
+    ],
+    galaxies: [
+      { id: 0, name: 'dreamy', hue: 0.11, size: 3 },
+      { id: 1, name: 'tinkering', hue: 0.73, size: 3 },
+    ],
+  };
+}
+
+const withUniverse = (u: Universe = universe()) => ({ ...empty, get_universe: () => u });
+
+async function openUniverse(page: Page) {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Universe' }).click();
+}
+
+/** How many colours are in a screenshot of an element. The page decodes the PNG, so no library is needed. */
+async function distinctColors(page: Page, element: Locator) {
+  const png = (await element.screenshot()).toString('base64');
+  return page.evaluate(async (png) => {
+    const image = new Image();
+    image.src = `data:image/png;base64,${png}`;
+    await image.decode();
+    const canvas = document.createElement('canvas');
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const context = canvas.getContext('2d', { willReadFrequently: true })!;
+    context.drawImage(image, 0, 0);
+    const { data } = context.getImageData(0, 0, image.width, image.height);
+    const colors = new Set<number>();
+    for (let i = 0; i < data.length; i += 4) colors.add((data[i] << 16) | (data[i + 1] << 8) | data[i + 2]);
+    return colors.size;
+  }, png);
+}
+
+test('universe draws something', async ({ page }) => {
+  const asked: unknown[] = [];
+  await installMockIpc(page, {
+    ...empty,
+    get_universe: (args) => {
+      asked.push(args);
+      return universe();
+    },
+  });
+
+  await openUniverse(page);
+
+  const canvas = page.locator('canvas');
+  await expect(canvas).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Universe' })).toBeVisible();
+  await expect(page.getByText('6 Planets, 5 Links, 2 Galaxies')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Universe' })).toHaveAttribute('aria-current', 'page');
+  await expect(page.getByRole('button', { name: 'Sources' })).not.toHaveAttribute('aria-current', 'page');
+  await expect(page.getByRole('heading', { name: 'Add your history' })).toBeHidden();
+  await expect.poll(() => distinctColors(page, canvas), { timeout: 15_000 }).toBeGreaterThan(50);
+  expect(asked).toEqual([{ filter: 'both' }]);
+});
+
+test('three.js loads only on the Universe screen', async ({ page }) => {
+  const scripts: string[] = [];
+  page.on('request', (request) => {
+    if (request.resourceType() === 'script') scripts.push(request.url());
+  });
+  await installMockIpc(page, withUniverse());
+
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Add your history' })).toBeVisible();
+  const onSources = scripts.length;
+  const hasThree = (url: string) => fetch(url).then(async (r) => (await r.text()).includes('WebGLRenderer'));
+  for (const url of scripts) {
+    expect(await page.evaluate(hasThree, url), `${url} holds three.js`).toBe(false);
+  }
+
+  await page.getByRole('button', { name: 'Universe' }).click();
+  await expect(page.locator('canvas')).toBeVisible();
+  expect(scripts.length).toBeGreaterThan(onSources);
+});
+
+test('the Universe draws under the app CSP', async ({ page }) => {
+  const problems: string[] = [];
+  page.on('console', (message) => {
+    if (message.type() === 'error') problems.push(message.text());
+  });
+  page.on('pageerror', (error) => problems.push(error.message));
+  const csp: string = tauriConfig.app.security.csp;
+  await page.route('**/*', async (route) => {
+    const response = await route.fetch();
+    await route.fulfill({ response, headers: { ...response.headers(), 'content-security-policy': csp } });
+  });
+  await installMockIpc(page, withUniverse());
+
+  await openUniverse(page);
+
+  const canvas = page.locator('canvas');
+  await expect(canvas).toBeVisible();
+  await expect.poll(() => distinctColors(page, canvas), { timeout: 15_000 }).toBeGreaterThan(50);
+  expect(problems).toEqual([]);
+});
+
+/** One Planet, which fills the middle of the view. The corners hold nothing but stars. */
+function onePlanet(): Universe {
+  return {
+    filter: 'spotify',
+    planets: [{ ...universe().planets[0], radius: 4, position: [0, 0, 0] }],
+    links: [],
+    galaxies: [{ id: 0, name: 'dreamy', hue: 0.11, size: 1 }],
+  };
+}
+
+test('clicking a Planet names it', async ({ page }) => {
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await installMockIpc(page, withUniverse(onePlanet()));
+
+  await openUniverse(page);
+  const canvas = page.locator('canvas');
+  await expect(canvas).toBeVisible();
+  const status = page.getByRole('status');
+  await expect(status).toContainText('Click a Planet');
+
+  const box = (await canvas.boundingBox())!;
+  await page.mouse.click(box.x + 8, box.y + 8);
+  await expect(status).toContainText('Click a Planet');
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await expect(status).toHaveText('Moth Season, in the dreamy Galaxy');
+});
+
+test('dragging turns the Universe and does not pick a Planet', async ({ page }) => {
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await installMockIpc(page, withUniverse(onePlanet()));
+  await openUniverse(page);
+  const canvas = page.locator('canvas');
+  await expect(canvas).toBeVisible();
+  const box = (await canvas.boundingBox())!;
+  const middle = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  const before = await canvas.screenshot();
+
+  // It ends on the Planet, where a click would pick it. The stars show the turn.
+  await page.mouse.move(middle.x + 150, middle.y + 40);
+  await page.mouse.down();
+  await page.mouse.move(middle.x, middle.y, { steps: 5 });
+  await page.mouse.up();
+
+  await expect.poll(async () => (await canvas.screenshot()).equals(before)).toBe(false);
+  await expect(page.getByRole('status')).toContainText('Click a Planet');
+});
+
+test('an empty Universe says what to do', async ({ page }) => {
+  await installMockIpc(page, withUniverse({ filter: 'both', planets: [], links: [], galaxies: [] }));
+
+  await openUniverse(page);
+
+  await expect(page.getByText('Nothing to draw yet.')).toBeVisible();
+  await expect(page.locator('canvas')).toHaveCount(0);
+});
+
+test('a Universe that cannot load shows why', async ({ page }) => {
+  await installMockIpc(page, {
+    ...empty,
+    get_universe: () => {
+      throw new Error('Rostery could not use its local database.');
+    },
+  });
+
+  await openUniverse(page);
+
+  await expect(page.getByRole('alert')).toContainText('could not use its local database');
+});
+
+test('with no WebGL the screen says so and the Planet count still shows', async ({ page }) => {
+  await page.addInitScript(() => {
+    const real = HTMLCanvasElement.prototype.getContext as any;
+    HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement, kind: string, ...rest: unknown[]) {
+      return kind.startsWith('webgl') ? null : real.call(this, kind, ...rest);
+    } as any;
+  });
+  await installMockIpc(page, withUniverse());
+
+  await openUniverse(page);
+
+  await expect(page.getByRole('alert')).toContainText('could not start 3D drawing');
+  await expect(page.getByText('6 Planets, 5 Links, 2 Galaxies')).toBeVisible();
+});
+
+test('leaving the Universe frees its drawing context and coming back asks for fresh data', async ({ page }) => {
+  let asked = 0;
+  await installMockIpc(page, {
+    ...empty,
+    get_universe: () => {
+      asked += 1;
+      return universe();
+    },
+  });
+
+  await page.goto('/');
+  for (let visit = 0; visit < 3; visit += 1) {
+    await page.getByRole('button', { name: 'Universe' }).click();
+    const canvas = await page.locator('canvas').elementHandle();
+    await page.getByRole('button', { name: 'Sources' }).click();
+    await expect(page.locator('canvas')).toHaveCount(0);
+    // A browser only allows about 16 live contexts, so one left behind would cost the 17th visit.
+    const lost = await canvas!.evaluate((c: HTMLCanvasElement) => c.getContext('webgl2')!.isContextLost());
+    expect(lost).toBe(true);
+  }
+
+  await expect(page.getByRole('heading', { name: 'Add your history' })).toBeVisible();
+  expect(asked).toBe(3);
+});
+
+test('an import keeps going while you look at the Universe', async ({ page }) => {
+  await page.setViewportSize({ width: 1000, height: 600 });
+  let finish = () => {};
+  await installMockIpc(page, {
+    ...withUniverse(),
+    'plugin:dialog|open': () => ['/d/my_spotify_data.zip'],
+    import_paths: () => new Promise((resolve) => (finish = () => resolve({ ...nothing, filesRead: 1, added: 5 }))),
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Choose file' }).click();
+  await expect(page.getByRole('status')).toContainText('Reading your history');
+
+  await page.getByRole('button', { name: 'Universe' }).click();
+  await expect(page.locator('canvas')).toBeVisible();
+  finish();
+  await page.getByRole('button', { name: 'Sources' }).click();
+
+  const status = page.getByRole('status');
+  await expect(status).toHaveText('Added 5 Plays.');
+  await expect(status).toBeInViewport();
+});
+
+test('a file dropped on another screen is not imported out of sight', async ({ page }) => {
+  const imported: unknown[] = [];
+  await installMockIpc(page, {
+    ...withUniverse(),
+    import_paths: (args) => {
+      imported.push(args);
+      return { ...nothing, filesRead: 1, added: 5 };
+    },
+  });
+
+  await page.goto('/');
+  await dragFile(page);
+  await page.getByRole('button', { name: 'Universe' }).click();
+  await expect(page.locator('canvas')).toBeVisible();
+
+  await emitEvent(page, 'tauri://drag-drop', { paths: ['/d/first.zip'], position: { x: 9, y: 9 } });
+  await page.getByRole('button', { name: 'Sources' }).click();
+
+  await expect(page.locator('.import')).not.toHaveClass(/over/);
+  await expect(page.getByRole('status')).toBeHidden();
+  expect(imported).toEqual([]);
 });

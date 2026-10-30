@@ -1,6 +1,15 @@
-import type { ImportSummary } from './types';
+import type { ImportSummary, Universe } from './types';
 
 const count = (n: number, one: string, many: string) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
+
+/** For example "60 Planets, 214 Links, 10 Galaxies". */
+export function describeUniverse(u: Universe): string {
+  return [
+    count(u.planets.length, 'Planet', 'Planets'),
+    count(u.links.length, 'Link', 'Links'),
+    count(u.galaxies.length, 'Galaxy', 'Galaxies'),
+  ].join(', ');
+}
 
 /** An import in plain words, for example "Added 41,203 Plays. Skipped 12 private sessions." */
 export function describeImport(s: ImportSummary): string {

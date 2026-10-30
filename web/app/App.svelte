@@ -1,14 +1,17 @@
 <script lang="ts">
   import Sources from './screens/Sources.svelte';
+  import Universe from './screens/Universe.svelte';
 
-  // Only Sources works so far. The rest are placeholders for later screens.
+  // The rest are placeholders for later screens.
   const rail = [
     { label: 'Sources', ready: true },
-    { label: 'Universe', ready: false },
+    { label: 'Universe', ready: true },
     { label: 'Roast', ready: false },
     { label: 'Share', ready: false },
     { label: 'Settings', ready: false },
   ];
+
+  let screen = $state('Sources');
 </script>
 
 <div class="shell">
@@ -19,8 +22,9 @@
         <li class:last={label === 'Settings'}>
           <button
             disabled={!ready}
-            aria-current={ready ? 'page' : undefined}
+            aria-current={label === screen ? 'page' : undefined}
             title={ready ? undefined : 'Not available yet'}
+            onclick={() => (screen = label)}
           >
             {label}
           </button>
@@ -29,7 +33,11 @@
     </ul>
   </nav>
   <main>
-    <Sources />
+    <!-- Sources stays mounted, so an import keeps its place and its result while you look elsewhere. -->
+    <Sources active={screen === 'Sources'} />
+    {#if screen === 'Universe'}
+      <Universe />
+    {/if}
   </main>
 </div>
 
