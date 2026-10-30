@@ -3,7 +3,7 @@
 use super::{Galaxy, Link, Planet, TopItem, UniverseFilter, UniverseInput};
 use crate::ingest::looks_like_id;
 use crate::model::{Play, Source};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write;
 
 /// Takeout has no durations, so a watch counts as this many milliseconds.
@@ -11,6 +11,11 @@ const WATCH_MS: i64 = 8 * 60_000;
 const MIN_RADIUS: f64 = 0.6;
 const RADIUS_RANGE: f64 = 3.4;
 const MAX_PLANETS: usize = 150;
+/// In the Both view, places held for each Source's heaviest Creators, so a heavy listener still
+/// sees their channels.
+const RESERVED_PER_SOURCE: usize = 40;
+/// Minutes of weight a Creator needs for a reserved place, which one watch of 8 minutes is not.
+const MIN_RESERVED_WEIGHT: f64 = 30.0;
 const TOP_ITEMS: usize = 5;
 const SESSION_GAP_SECS: i64 = 30 * 60;
 /// So a week of autoplay cannot form a giant clique.
@@ -47,6 +52,37 @@ fn in_view(filter: UniverseFilter, source: Source) -> bool {
         UniverseFilter::Spotify => source == Source::Spotify,
         UniverseFilter::Youtube => source == Source::Youtube,
     }
+}
+
+/// One Creator's weight, who they are, and what was counted for them.
+type Ranked<'a> = (f64, (Source, &'a str), Tally<'a>);
+
+/// Cuts `ranked`, heaviest first, down to the cap and keeps its order, so `id`, Link ties and Galaxy
+/// names all follow real weight. A single Source keeps its heaviest. In Both, each Source first
+/// holds its reserved places, and whatever is left goes by weight.
+fn within_cap(mut ranked: Vec<Ranked>, filter: UniverseFilter) -> Vec<Ranked> {
+    if filter != UniverseFilter::Both {
+        ranked.truncate(MAX_PLANETS);
+        return ranked;
+    }
+    let mut held: HashMap<Source, usize> = HashMap::new();
+    let mut keep: Vec<bool> = ranked
+        .iter()
+        .map(|(weight, (source, _), _)| {
+            let count = held.entry(*source).or_default();
+            let reserved = *weight >= MIN_RESERVED_WEIGHT && *count < RESERVED_PER_SOURCE;
+            *count += usize::from(reserved);
+            reserved
+        })
+        .collect();
+    let open = MAX_PLANETS - keep.iter().filter(|k| **k).count();
+    keep.iter_mut()
+        .filter(|k| !**k)
+        .take(open)
+        .for_each(|k| *k = true);
+    let mut keep = keep.into_iter();
+    ranked.retain(|_| keep.next() == Some(true));
+    ranked
 }
 
 /// The heaviest Creators as Planets, heaviest first, with no position or Galaxy yet.
@@ -96,12 +132,12 @@ pub fn planets(input: &UniverseInput, filter: UniverseFilter) -> Vec<Planet> {
     }
 
     let minutes = |t: &Tally| t.ms as f64 / 60_000.0;
-    let mut ranked: Vec<(f64, (Source, &str), Tally)> = tallies
+    let mut ranked: Vec<Ranked> = tallies
         .into_iter()
         .map(|(key, t)| (minutes(&t) + t.affinity, key, t))
         .collect();
     ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    ranked.truncate(MAX_PLANETS);
+    let ranked = within_cap(ranked, filter);
 
     let mut heaviest: HashMap<Source, f64> = HashMap::new();
     for (weight, (source, _), _) in &ranked {
@@ -362,6 +398,8 @@ pub fn galaxies(
         let next = ids.len() as u32;
         planet.galaxy = *ids.entry(label).or_insert(next);
     }
+    // A name from a Roast is taken from the start, so no default can land on it.
+    let mut taken: HashSet<String> = names.values().cloned().collect();
     (0..ids.len() as u32)
         .map(|id| {
             let members: Vec<&Planet> = planets.iter().filter(|p| p.galaxy == id).collect();
@@ -370,7 +408,7 @@ pub fn galaxies(
                 name: names
                     .get(&id)
                     .cloned()
-                    .unwrap_or_else(|| default_name(&members)),
+                    .unwrap_or_else(|| default_name(&members, &mut taken)),
                 hue: (FIRST_HUE + id as f64 * GOLDEN_RATIO).fract(),
                 size: members.len() as u32,
             }
@@ -378,20 +416,34 @@ pub fn galaxies(
         .collect()
 }
 
-/// The most common Interest, the first in the alphabet on a tie, or else the heaviest member.
-fn default_name(members: &[&Planet]) -> String {
+/// The most common Interest no heavier Galaxy has, the first in the alphabet on a tie, or else the
+/// heaviest member. Two Galaxies can have the same heaviest name on two Sources, so that gets a number.
+fn default_name(members: &[&Planet], taken: &mut HashSet<String>) -> String {
     let mut counts: BTreeMap<&str, u32> = BTreeMap::new();
     for tag in members.iter().flat_map(|p| &p.interests) {
         *counts.entry(tag).or_default() += 1;
     }
-    let mut best: Option<(&str, u32)> = None;
-    for (tag, count) in counts {
-        if best.is_none_or(|(_, most)| count > most) {
-            best = Some((tag, count));
-        }
-    }
-    best.map_or(members[0].name.as_str(), |(tag, _)| tag)
-        .to_string()
+    let mut free: Vec<(&str, u32)> = counts
+        .into_iter()
+        .filter(|(tag, _)| !taken.contains(*tag))
+        .collect();
+    // Stable, so a tie stays in the alphabetical order of the map.
+    free.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+    let name = free.first().map_or_else(
+        || {
+            let heaviest = &members[0].name;
+            (1..)
+                .map(|n| match n {
+                    1 => heaviest.clone(),
+                    n => format!("{heaviest} {n}"),
+                })
+                .find(|name| !taken.contains(name))
+                .expect("a count that never ends has a free number")
+        },
+        |(tag, _)| tag.to_string(),
+    );
+    taken.insert(name.clone());
+    name
 }
 
 #[cfg(test)]
@@ -781,6 +833,72 @@ mod tests {
         assert_eq!(named.galaxies[1].name, "Nameless");
     }
 
+    fn galaxy_of<'a>(u: &'a Universe, name: &str) -> &'a str {
+        &u.galaxies[planet(u, name).galaxy as usize].name
+    }
+
+    /// Two pairs that each share Sessions and a Creator alone. They all have "jazz", but with this
+    /// many other Interests that is too little to link them across the groups.
+    fn three_galaxies() -> (Vec<Play>, InterestMap) {
+        let plays = vec![
+            spotify("A", 0, 90),
+            spotify("B", 60, 80),
+            spotify("A", DAY, 1),
+            spotify("B", DAY + 60, 1),
+            spotify("C", 2 * DAY, 70),
+            spotify("D", 2 * DAY + 60, 60),
+            spotify("C", 3 * DAY, 1),
+            spotify("D", 3 * DAY + 60, 1),
+            spotify("E", 4 * DAY, 50),
+        ];
+        let map = interests(&[
+            (Source::Spotify, "A", &["jazz", "lounge", "a1", "a2"]),
+            (Source::Spotify, "B", &["jazz", "lounge", "b1", "b2"]),
+            (Source::Spotify, "C", &["jazz", "metal", "c1", "c2"]),
+            (Source::Spotify, "D", &["jazz", "metal", "d1", "d2"]),
+            (Source::Spotify, "E", &["jazz"]),
+        ]);
+        (plays, map)
+    }
+
+    #[test]
+    fn default_galaxy_names_do_not_repeat() {
+        let (plays, map) = three_galaxies();
+        let u = with_interests(&plays, &map, Spotify);
+        assert_eq!(u.galaxies.len(), 3);
+        // The heaviest Galaxy gets "jazz", the next its next most common, and the last has only
+        // "jazz", so it takes the name of its heaviest member.
+        assert_eq!(galaxy_of(&u, "A"), "jazz");
+        assert_eq!(galaxy_of(&u, "C"), "metal");
+        assert_eq!(galaxy_of(&u, "E"), "E");
+    }
+
+    #[test]
+    fn a_name_from_a_roast_is_taken_too() {
+        let (plays, map) = three_galaxies();
+        let names = HashMap::from([(1, "jazz".to_string())]);
+        let u = build(
+            &UniverseInput {
+                plays: &plays,
+                affinities: &[],
+                interests: &map,
+                galaxy_names: &names,
+            },
+            Spotify,
+        );
+        assert_eq!(galaxy_of(&u, "C"), "jazz");
+        assert_eq!(galaxy_of(&u, "A"), "lounge");
+    }
+
+    #[test]
+    fn two_galaxies_named_after_one_creator_name_stay_apart() {
+        // No Interests, and the same name on two Sources in two Galaxies.
+        let u = from_plays(&[spotify("Twin", 0, 9), youtube("Twin", DAY)], Both);
+        let mut names: Vec<_> = u.galaxies.iter().map(|g| g.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, ["Twin", "Twin 2"]);
+    }
+
     #[test]
     fn galaxy_hues_differ() {
         let plays: Vec<_> = (0..12)
@@ -907,33 +1025,116 @@ mod tests {
         u.planets.iter().filter(|p| p.source == source).count()
     }
 
-    #[test]
-    fn the_cap_in_both_goes_by_weight_alone() {
-        // Ranking on share of each Source would keep 1 artist and 149 channels, and giving each
-        // Source half would keep 75 of each. One watch is not months of listening.
-        let mut plays: Vec<_> = (0..200)
-            .map(|i| {
-                let minutes = if i == 0 { 100_000 } else { 40_000 - i };
-                spotify(&format!("Artist {i:03}"), i * DAY, minutes)
+    /// Artists heavier than any channel, from 100,000 minutes down.
+    fn heavy_artists(count: i64) -> Vec<Play> {
+        (0..count)
+            .map(|i| spotify(&format!("Artist {i:03}"), i * DAY, 100_000 - i))
+            .collect()
+    }
+
+    /// Each channel watched this many times. A watch counts as 8 minutes.
+    fn channels(count: i64, watches: i64) -> Vec<Play> {
+        (0..count)
+            .flat_map(|c| {
+                (0..watches).map(move |w| youtube(&format!("Channel {c:03}"), (1000 + c) * DAY + w))
             })
-            .collect();
-        plays.extend((0..200).map(|i| youtube(&format!("Channel {i:03}"), (1000 + i) * DAY)));
-        plays.push(youtube("Channel 199", 2000 * DAY));
-
-        let u = from_plays(&plays, Both);
-        assert_eq!(in_source(&u, Source::Spotify), 150);
-        assert_eq!(in_source(&u, Source::Youtube), 0);
-        assert_eq!(u.planets[149].name, "Artist 149");
-
-        // The channels are still in their own view, heaviest first.
-        let channels = from_plays(&plays, Youtube);
-        assert_eq!(channels.planets.len(), 150);
-        assert_eq!(channels.planets[0].name, "Channel 199");
+            .collect()
     }
 
     #[test]
-    fn the_cap_in_both_keeps_a_heavy_channel_over_a_lighter_artist() {
-        // 200 artists of 1,000 minutes down to 801, and channels of 1,040, 880 and 800.
+    fn a_heavy_listener_still_gets_40_channels_in_both() {
+        let mut plays = heavy_artists(400);
+        plays.extend(channels(60, 5));
+        let u = from_plays(&plays, Both);
+        assert_eq!(u.planets.len(), 150);
+        assert_eq!(in_source(&u, Source::Youtube), 40);
+        assert_eq!(in_source(&u, Source::Spotify), 110);
+        // The first 40 channels by name, because they all tie on weight.
+        assert!(u.planets.iter().any(|p| p.name == "Channel 039"));
+        assert!(!u.planets.iter().any(|p| p.name == "Channel 040"));
+        assert!(u.planets.iter().any(|p| p.name == "Artist 109"));
+        assert!(!u.planets.iter().any(|p| p.name == "Artist 110"));
+    }
+
+    #[test]
+    fn a_channel_with_a_single_watch_gets_no_reserved_place() {
+        let mut plays = heavy_artists(400);
+        plays.extend(channels(60, 1));
+        let u = from_plays(&plays, Both);
+        assert_eq!(in_source(&u, Source::Spotify), 150);
+        assert_eq!(in_source(&u, Source::Youtube), 0);
+
+        // The channels are still in their own view, heaviest first.
+        let own = from_plays(&plays, Youtube);
+        assert_eq!(own.planets.len(), 60);
+        assert_eq!(own.planets[0].name, "Channel 000");
+    }
+
+    #[test]
+    fn a_reserved_place_needs_at_least_30_minutes() {
+        let with_channel_of = |minutes: i64| {
+            let mut plays = heavy_artists(200);
+            let mut channel = youtube("Channel", 2000 * DAY);
+            channel.duration_ms = Some(minutes * 60_000);
+            plays.push(channel);
+            from_plays(&plays, Both)
+        };
+        assert_eq!(in_source(&with_channel_of(29), Source::Youtube), 0);
+        assert_eq!(in_source(&with_channel_of(30), Source::Youtube), 1);
+    }
+
+    #[test]
+    fn a_source_with_few_heavy_creators_leaves_its_places_to_weight() {
+        // 10 channels qualify, so the other 30 places go to the next heaviest, which are artists.
+        let mut plays = heavy_artists(400);
+        plays.extend(channels(10, 5));
+        plays.extend((0..100).map(|i| youtube(&format!("Light {i:03}"), (3000 + i) * DAY)));
+        let u = from_plays(&plays, Both);
+        assert_eq!(u.planets.len(), 150);
+        assert_eq!(in_source(&u, Source::Youtube), 10);
+        assert_eq!(in_source(&u, Source::Spotify), 140);
+        assert!(!u.planets.iter().any(|p| p.name.starts_with("Light")));
+    }
+
+    #[test]
+    fn the_reserve_works_for_a_heavy_watcher_too() {
+        // 400 channels of 1,040 minutes outweigh 60 artists of 40 minutes.
+        let mut plays = channels(400, 130);
+        plays.extend((0..60).map(|i| spotify(&format!("Artist {i:03}"), (5000 + i) * DAY, 40)));
+        let u = from_plays(&plays, Both);
+        assert_eq!(in_source(&u, Source::Spotify), 40);
+        assert_eq!(in_source(&u, Source::Youtube), 110);
+    }
+
+    #[test]
+    fn a_reserved_place_comes_after_the_others_in_weight_order() {
+        let mut plays = heavy_artists(400);
+        plays.extend(channels(60, 5));
+        let u = from_plays(&plays, Both);
+        // IDs run by real weight, so the reserved channels sit below every artist.
+        assert_eq!(u.planets[109].name, "Artist 109");
+        assert_eq!(u.planets[110].name, "Channel 000");
+        assert!(u
+            .planets
+            .iter()
+            .enumerate()
+            .all(|(i, p)| p.id as usize == i));
+    }
+
+    #[test]
+    fn single_source_views_stay_plain_heaviest_first() {
+        let mut plays = heavy_artists(400);
+        plays.extend(channels(60, 5));
+        let artists = from_plays(&plays, Spotify);
+        assert_eq!(artists.planets.len(), 150);
+        assert_eq!(artists.planets[149].name, "Artist 149");
+        assert_eq!(from_plays(&plays, Youtube).planets.len(), 60);
+    }
+
+    #[test]
+    fn the_cap_in_both_fits_a_heavy_channel_beside_the_reserve() {
+        // 200 artists of 1,000 minutes down to 801, and channels of 1,040, 880 and 800. Every channel
+        // qualifies for a reserved place, and the artists fill what is left by weight.
         let mut plays: Vec<_> = (0..200)
             .map(|i| spotify(&format!("Artist {i:03}"), i * DAY, 1000 - i))
             .collect();
@@ -944,8 +1145,8 @@ mod tests {
         assert_eq!(u.planets.len(), 150);
         assert_eq!(u.planets[0].name, "Big");
         assert!(u.planets.iter().any(|p| p.name == "Middle"));
-        assert!(!u.planets.iter().any(|p| p.name == "Light"));
-        assert_eq!(in_source(&u, Source::Spotify), 148);
+        assert!(u.planets.iter().any(|p| p.name == "Light"));
+        assert_eq!(in_source(&u, Source::Spotify), 147);
         assert!(close(planet(&u, "Big").radius, 4.0));
         assert!(close(planet(&u, "Artist 000").radius, 4.0));
     }
