@@ -4,13 +4,13 @@
 
 **Blocked by:** 04
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Spotify and YouTube Planets look different, and no two look identical
-- [ ] Clicking a Planet opens details, including why it links to its neighbours and a link back to the Source
-- [ ] Filter tabs show only the Sources that have data
-- [ ] A keyboard-reachable list view is always available, and replaces the canvas without WebGL
-- [ ] Auto-rotation is off under `prefers-reduced-motion`
-- [ ] An empty Universe explains what to do next
+- [x] Spotify and YouTube Planets look different, and no two look identical
+- [x] Clicking a Planet opens details, including why it links to its neighbours and a link back to the Source
+- [x] Filter tabs show only the Sources that have data
+- [x] A keyboard-reachable list view is always available, and replaces the canvas without WebGL
+- [x] Auto-rotation is off under `prefers-reduced-motion`
+- [x] An empty Universe explains what to do next
 
 Stop point 2 follows this ticket.
