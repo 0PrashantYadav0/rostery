@@ -4,6 +4,7 @@ export default defineConfig({
   testDir: 'e2e',
   // Chromium draws in software here, so a sky of many Planets on a busy machine takes its time.
   timeout: 60_000,
+  expect: { timeout: 15_000 },
   webServer: {
     // `pnpm test:e2e` builds first; this serves dist/app.
     command: 'pnpm exec vite preview',

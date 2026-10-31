@@ -111,16 +111,17 @@ export const planetFragment = /* glsl */ `
   // Every crater near this point added up: how the ground slopes in xyz, and how high it stands in w.
   // The slope is worked out from the crater's shape, not read off neighbouring pixels, so it stays smooth
   // however close the camera comes. The shape is a bowl, plus a lip that has faded to nothing by 1.4.
+  // A crater's centre stays in the middle half of its cell and it reaches at most half a cell, so only the
+  // 8 cells nearest this point can touch it, which is most of what makes this affordable.
   vec4 craters(vec3 p, float scale) {
-    vec3 cell = floor(p * scale);
-    vec3 inside = fract(p * scale);
+    vec3 first = floor(p * scale - 0.5);
     vec4 sum = vec4(0.0);
-    for (int x = -1; x <= 1; x++) for (int y = -1; y <= 1; y++) for (int z = -1; z <= 1; z++) {
-      vec3 near = cell + vec3(x, y, z);
-      if (hash(near + 21.7) < 0.3) continue;
-      vec3 centre = vec3(x, y, z) + vec3(hash(near), hash(near + 3.1), hash(near + 7.7));
-      float size = 0.2 + 0.34 * hash(near + 13.3);
-      vec3 away = inside - centre;
+    for (int x = 0; x <= 1; x++) for (int y = 0; y <= 1; y++) for (int z = 0; z <= 1; z++) {
+      vec3 near = first + vec3(x, y, z);
+      if (hash(near + 21.7) < 0.18) continue;
+      vec3 centre = near + 0.25 + 0.5 * vec3(hash(near), hash(near + 3.1), hash(near + 7.7));
+      float size = 0.14 + 0.21 * hash(near + 13.3);
+      vec3 away = p * scale - centre;
       float d = length(away) / size;
       if (d >= 1.4) continue;
       float inner = max(1.0 - d * d, 0.0);
@@ -137,16 +138,17 @@ export const planetFragment = /* glsl */ `
   vec3 rockSurface(vec3 p, out vec3 relief) {
     vec3 q = p + vSeed * 29.0;
     float ground = fbm(q * 2.3);
-    float grain = fbm(q * 9.0);
+    float grain = 0.6 * noise(q * 9.0) + 0.4 * noise(q * 21.0);
+    // Fine pits on a far-off Planet are smaller than a pixel, so skip all that work for something nobody sees.
     float fine = 1.0 - smoothstep(0.03, 0.14, fwidth(p.x) + fwidth(p.y));
-    vec4 big = craters(q, 2.5);
-    vec4 tiny = craters(q + 5.0, 6.0) * fine;
-    relief = big.xyz * 0.62 + tiny.xyz * 0.26;
+    vec4 big = craters(q, 2.2);
+    vec4 tiny = fine > 0.0 ? craters(q + 5.0, 4.8) * fine : vec4(0.0);
+    relief = big.xyz * 0.8 + tiny.xyz * 0.34;
 
     vec3 stone = mix(vec3(0.3, 0.29, 0.28), vTint, 0.6);
     vec3 color = mix(stone * 0.58, stone * 1.28, smoothstep(0.25, 0.75, ground));
     color *= 0.88 + 0.32 * (grain - 0.5);
-    color *= 1.0 + clamp(big.w, -1.0, 0.4) * 0.4 + clamp(tiny.w, -1.0, 0.4) * 0.16;
+    color *= 1.0 + clamp(big.w, -1.0, 0.4) * 0.5 + clamp(tiny.w, -1.0, 0.4) * 0.22;
     return color;
   }
 

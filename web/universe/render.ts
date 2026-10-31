@@ -193,11 +193,13 @@ function surfaces(universe: Universe, materials: Materials, colors: Map<number, 
   return rings.length ? [mesh, ringMesh] : [mesh];
 }
 
-/** Soft light: a halo round each Planet, and a few clouds of dust round each, so a Galaxy shows as one place. */
+/**
+ * Soft light: a halo round each Planet, and a cloud of dust round each, so a Galaxy shows as one place. A cloud
+ * is cheap to work out but covers a lot of pixels, and that is what limits the frame rate here, so one each.
+ */
 function glows(universe: Universe, materials: Materials, colors: Map<number, Rgb>) {
   const { planets } = universe;
-  const CLOUDS_PER_PLANET = 3;
-  const mesh = new InstancedMesh(new PlaneGeometry(2, 2), materials.glow, planets.length * (1 + CLOUDS_PER_PLANET));
+  const mesh = new InstancedMesh(new PlaneGeometry(2, 2), materials.glow, planets.length * 2);
   const matrix = new Matrix4();
   const color = new Color();
   let at = 0;
@@ -221,10 +223,8 @@ function glows(universe: Universe, materials: Materials, colors: Map<number, Rgb
     add(planet.position, planet.radius * 2.5, mix(tint, IVORY, 0.12), planet.source === 'youtube' ? 0.22 : 0.3);
     const next = random(planetSeed(`${planet.name} dust`));
     const spread = reach.get(planet.galaxy)!;
-    for (let cloud = 0; cloud < CLOUDS_PER_PLANET; cloud += 1) {
-      const place = planet.position.map((c) => c + (next() - 0.5) * spread * 0.9) as Rgb;
-      add(place, spread * (0.55 + next() * 0.55), mix(tint, [0.2, 0.4, 0.55], 0.25 * next()), 0.042 + next() * 0.03);
-    }
+    const place = planet.position.map((c) => c + (next() - 0.5) * spread * 0.7) as Rgb;
+    add(place, spread * (0.72 + next() * 0.3), mix(tint, [0.2, 0.4, 0.55], 0.25 * next()), 0.1 + next() * 0.05);
   }
   mesh.frustumCulled = false;
   return mesh;
