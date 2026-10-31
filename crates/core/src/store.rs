@@ -1,5 +1,6 @@
 use crate::error::Result;
 use crate::model::{Affinity, InterestMap, Origin, Play, Source, SourceTotals, Totals};
+use crate::roast::{Roast, StoredRoast};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{de::DeserializeOwned, Serialize};
 use std::path::Path;
@@ -373,6 +374,45 @@ impl Store {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Only a finished Roast gets here, so a failed run can never replace the one before it.
+    pub fn save_roast(
+        &self,
+        provider_label: &str,
+        roast: &Roast,
+        created_at: i64,
+    ) -> Result<StoredRoast> {
+        self.conn.execute(
+            "INSERT INTO roasts (created_at, provider_label, json) VALUES (?1, ?2, ?3)",
+            params![created_at, provider_label, serde_json::to_string(roast)?],
+        )?;
+        Ok(StoredRoast {
+            id: self.conn.last_insert_rowid(),
+            created_at,
+            provider_label: provider_label.to_owned(),
+            roast: roast.clone(),
+        })
+    }
+
+    pub fn latest_roast(&self) -> Result<Option<StoredRoast>> {
+        let row: Option<(i64, i64, String, String)> = self
+            .conn
+            .query_row(
+                "SELECT id, created_at, provider_label, json FROM roasts ORDER BY id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        row.map(|(id, created_at, provider_label, json)| {
+            Ok(StoredRoast {
+                id,
+                created_at,
+                provider_label,
+                roast: serde_json::from_str(&json)?,
+            })
+        })
+        .transpose()
     }
 
     pub fn get_setting<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {

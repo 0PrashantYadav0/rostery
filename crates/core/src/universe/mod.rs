@@ -4,6 +4,8 @@
 mod graph;
 mod layout;
 
+pub(crate) use graph::play_ms;
+
 use crate::model::{Affinity, InterestMap, Play, Source};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

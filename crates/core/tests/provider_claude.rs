@@ -1,0 +1,420 @@
+//! The real `llm::complete` against a fake `claude` that records what it was given. Release builds
+//! ignore the binary override, so there these would talk to the real CLI.
+#![cfg(debug_assertions)]
+
+use rostery_core::demo;
+use rostery_core::digest;
+use rostery_core::llm::{self, CompletionRequest, Provider};
+use rostery_core::roast;
+use rostery_core::store::Store;
+use serde_json::json;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
+use tempfile::TempDir;
+
+const SYSTEM: &str = "You are a very mean comedian.\nHere is a second line.";
+const USER: &str = "<digest>{\"secret\":\"only on stdin\"}</digest>";
+const OK: &str = r#"printf '{"type":"result","is_error":false,"result":"hello"}'"#;
+const LONG_ENOUGH: Duration = Duration::from_secs(20);
+
+/// Everything here changes this process's environment, so one test runs at a time.
+static ENV: Mutex<()> = Mutex::new(());
+
+struct Fake {
+    dir: TempDir,
+    _env: MutexGuard<'static, ()>,
+}
+
+impl Fake {
+    /// A `claude` that records its argv, stdin, cwd, the listing of its cwd and its environment,
+    /// then runs `body`.
+    fn new(body: &str) -> Fake {
+        let env = ENV.lock().unwrap_or_else(PoisonError::into_inner);
+        let dir = TempDir::new().unwrap();
+        let record = dir.path().display();
+        write_script(
+            &dir.path().join("claude"),
+            &format!(
+                "printf '%s\\0' \"$@\" > '{record}/argv'\n\
+                 cat > '{record}/stdin'\n\
+                 pwd -P > '{record}/cwd'\n\
+                 ls -A > '{record}/listing'\n\
+                 env > '{record}/env'\n\
+                 {body}"
+            ),
+        );
+        // No test here should depend on the rc files of whoever runs it.
+        std::env::set_var("SHELL", "/bin/sh");
+        std::env::set_var("ROSTERY_CLAUDE_BIN", dir.path().join("claude"));
+        Fake { dir, _env: env }
+    }
+
+    fn ask(&self, timeout: Duration) -> rostery_core::Result<String> {
+        llm::complete(
+            &Provider::ClaudeCode { model: None },
+            &CompletionRequest {
+                system: SYSTEM.into(),
+                user: USER.into(),
+                schema: json!({}),
+            },
+            timeout,
+        )
+    }
+
+    fn recorded(&self, name: &str) -> String {
+        std::fs::read_to_string(self.dir.path().join(name)).unwrap()
+    }
+
+    fn argv(&self) -> Vec<String> {
+        let raw = self.recorded("argv");
+        raw.strip_suffix('\0')
+            .unwrap()
+            .split('\0')
+            .map(String::from)
+            .collect()
+    }
+}
+
+impl Drop for Fake {
+    fn drop(&mut self) {
+        std::env::remove_var("ROSTERY_CLAUDE_BIN");
+    }
+}
+
+fn write_script(path: &Path, body: &str) {
+    std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn gone(pid: &str) -> bool {
+    !Command::new("kill")
+        .args(["-0", pid.trim()])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap()
+        .success()
+}
+
+/// A killed process can take a moment to leave the process table.
+fn wait_until_gone(pid: &str) -> bool {
+    let until = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < until {
+        if gone(pid) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
+#[test]
+fn claude_runs_without_tools() {
+    let fake = Fake::new(OK);
+    fake.ask(LONG_ENOUGH).unwrap();
+    assert_eq!(
+        fake.argv(),
+        [
+            "-p",
+            "--output-format",
+            "json",
+            "--system-prompt",
+            SYSTEM,
+            "--tools",
+            "",
+            "--strict-mcp-config",
+            "--no-session-persistence",
+            "--setting-sources",
+            "",
+        ]
+    );
+}
+
+#[test]
+fn claude_gets_the_model_when_one_is_set() {
+    let fake = Fake::new(OK);
+    llm::complete(
+        &Provider::ClaudeCode {
+            model: Some("haiku".into()),
+        },
+        &CompletionRequest {
+            system: SYSTEM.into(),
+            user: USER.into(),
+            schema: json!({}),
+        },
+        LONG_ENOUGH,
+    )
+    .unwrap();
+    let argv = fake.argv();
+    let at = argv.iter().position(|a| a == "--model").unwrap();
+    assert_eq!(argv[at + 1], "haiku");
+}
+
+#[test]
+fn claude_reads_digest_from_stdin() {
+    let fake = Fake::new(OK);
+    fake.ask(LONG_ENOUGH).unwrap();
+    assert_eq!(fake.recorded("stdin"), USER);
+    assert!(!fake.argv().iter().any(|arg| arg.contains("only on stdin")));
+}
+
+#[test]
+fn claude_runs_in_empty_temp_dir() {
+    let fake = Fake::new(OK);
+    fake.ask(LONG_ENOUGH).unwrap();
+    let cwd = fake.recorded("cwd");
+    let cwd = Path::new(cwd.trim());
+    assert_eq!(fake.recorded("listing"), "");
+    assert_ne!(
+        cwd,
+        std::env::current_dir().unwrap().canonicalize().unwrap()
+    );
+    assert!(!cwd.exists(), "the empty folder is cleaned up afterwards");
+}
+
+#[test]
+fn claude_child_has_no_api_key() {
+    let fake = Fake::new(OK);
+    std::env::set_var("ANTHROPIC_API_KEY", "sk-stray-key");
+    std::env::set_var("ANTHROPIC_AUTH_TOKEN", "stray-token");
+    std::env::set_var("OPENAI_API_KEY", "sk-other-stray-key");
+    std::env::set_var("ROSTERY_KEEPS_THIS", "yes");
+    let reply = fake.ask(LONG_ENOUGH);
+    for key in [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "OPENAI_API_KEY",
+        "ROSTERY_KEEPS_THIS",
+    ] {
+        std::env::remove_var(key);
+    }
+    reply.unwrap();
+    let env = fake.recorded("env");
+    assert!(!env.contains("ANTHROPIC_API_KEY"), "{env}");
+    assert!(!env.contains("ANTHROPIC_AUTH_TOKEN"), "{env}");
+    assert!(!env.contains("OPENAI_API_KEY"), "{env}");
+    assert!(
+        env.contains("ROSTERY_KEEPS_THIS=yes"),
+        "the rest of the environment stays"
+    );
+}
+
+#[test]
+fn claude_result_is_parsed() {
+    let fake = Fake::new(OK);
+    assert_eq!(fake.ask(LONG_ENOUGH).unwrap(), "hello");
+}
+
+#[test]
+fn claude_error_result_becomes_error() {
+    let fake = Fake::new(
+        r#"printf '{"type":"result","is_error":true,"result":"Credit balance is too low"}'"#,
+    );
+    let message = fake.ask(LONG_ENOUGH).unwrap_err().to_string();
+    assert!(message.contains("Credit balance is too low"), "{message}");
+    assert!(message.contains("try again"), "{message}");
+}
+
+#[test]
+fn logged_out_says_how_to_log_in() {
+    // What the CLI really prints, and with the exit code it really uses.
+    let fake = Fake::new(
+        r#"printf '{"type":"result","is_error":true,"result":"Not logged in · Please run /login"}'; exit 1"#,
+    );
+    let message = fake.ask(LONG_ENOUGH).unwrap_err().to_string();
+    assert!(message.contains("not logged in"), "{message}");
+    assert!(message.contains("/login"), "{message}");
+}
+
+#[test]
+fn nonzero_exit_reports_stderr() {
+    let fake = Fake::new("echo 'something broke in here' >&2; exit 3");
+    let message = fake.ask(LONG_ENOUGH).unwrap_err().to_string();
+    assert!(message.contains("something broke in here"), "{message}");
+}
+
+#[test]
+fn nonzero_exit_with_nothing_on_stderr_still_says_something() {
+    let fake = Fake::new("exit 3");
+    let message = fake.ask(LONG_ENOUGH).unwrap_err().to_string();
+    assert!(message.contains("exit code 3"), "{message}");
+    assert!(message.contains("terminal"), "{message}");
+}
+
+#[test]
+fn a_child_that_is_killed_says_so() {
+    let fake = Fake::new("kill -9 $$");
+    let message = fake.ask(LONG_ENOUGH).unwrap_err().to_string();
+    assert!(message.contains("stopped before it finished"), "{message}");
+    assert!(message.contains("try again"), "{message}");
+}
+
+#[test]
+fn a_reply_that_is_not_json_says_what_to_do() {
+    for body in [
+        "echo 'Welcome to Claude'",
+        ":",
+        r#"printf '{"type":"result","is_error":false}'"#,
+    ] {
+        let fake = Fake::new(body);
+        let message = fake.ask(LONG_ENOUGH).unwrap_err().to_string();
+        assert!(message.contains("could not read"), "{message}");
+        assert!(message.contains("claude update"), "{message}");
+    }
+}
+
+#[test]
+fn a_long_message_from_the_cli_is_cut_and_loses_its_control_characters() {
+    let fake = Fake::new(r#"printf '\033[31m'; yes broken | head -c 100000 >&2; exit 1"#);
+    let message = fake.ask(LONG_ENOUGH).unwrap_err().to_string();
+    assert!(message.len() < 1000, "{} bytes", message.len());
+    assert!(!message.contains('\u{1b}'));
+}
+
+#[test]
+fn a_flood_of_output_cannot_stall_the_run_or_fill_memory() {
+    let fake = Fake::new("yes flood | head -c 5000000; exit 0");
+    let started = Instant::now();
+    let message = fake.ask(LONG_ENOUGH).unwrap_err().to_string();
+    assert!(message.contains("could not read"), "{message}");
+    assert!(started.elapsed() < LONG_ENOUGH);
+}
+
+#[test]
+fn missing_binary_says_how_to_install() {
+    let fake = Fake::new(OK);
+    std::env::set_var("ROSTERY_CLAUDE_BIN", fake.dir.path().join("not-here"));
+    let message = fake.ask(LONG_ENOUGH).unwrap_err().to_string();
+    assert!(message.contains("could not find Claude Code"), "{message}");
+    assert!(message.contains("Install"), "{message}");
+}
+
+#[test]
+fn timeout_kills_child() {
+    // The CLI might be a wrapper, so whatever it started has to go as well.
+    let fake = Fake::new(
+        "dir=$(dirname \"$0\")\necho $$ > \"$dir/pid\"\nsleep 60 &\necho $! > \"$dir/inner\"\nwait",
+    );
+    let started = Instant::now();
+    let message = fake.ask(Duration::from_secs(1)).unwrap_err().to_string();
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "took {:?}",
+        started.elapsed()
+    );
+    assert!(message.contains("did not finish"), "{message}");
+    assert!(message.contains("try again"), "{message}");
+    assert!(
+        wait_until_gone(&fake.recorded("pid")),
+        "the CLI is still running"
+    );
+    assert!(
+        wait_until_gone(&fake.recorded("inner")),
+        "what it started is still running"
+    );
+}
+
+#[test]
+fn stop_running_ends_a_cli_when_the_app_quits() {
+    let fake = Fake::new("echo $$ > \"$(dirname \"$0\")/pid\"\nsleep 60 &\nwait");
+    std::thread::scope(|scope| {
+        let run = scope.spawn(|| fake.ask(LONG_ENOUGH));
+        let pid_file = fake.dir.path().join("pid");
+        let until = Instant::now() + Duration::from_secs(5);
+        while !pid_file.exists() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let started = Instant::now();
+        llm::stop_running();
+        let message = run.join().unwrap().unwrap_err().to_string();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(message.contains("stopped before it finished"), "{message}");
+    });
+    assert!(wait_until_gone(&fake.recorded("pid")));
+}
+
+/// Launched from Finder, an app gets a bare PATH. Here the test binary runs itself like that, so the
+/// real `login_shell_path` and its OnceLock start fresh, and only the login shell knows the way.
+#[test]
+fn a_finder_launch_finds_claude_through_the_login_shell() {
+    let _env = ENV.lock().unwrap_or_else(PoisonError::into_inner);
+    let dir = TempDir::new().unwrap();
+    let bin: PathBuf = dir.path().join("somewhere-only-the-shell-knows");
+    std::fs::create_dir(&bin).unwrap();
+    write_script(&bin.join("claude"), OK);
+    let shell = dir.path().join("shell");
+    write_script(
+        &shell,
+        &format!(
+            "echo 'Welcome back'\nexport PATH='{}:/usr/bin:/bin'\neval \"$2\"\necho 'Bye'",
+            bin.display()
+        ),
+    );
+
+    let child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "launched_like_finder",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .env("HOME", dir.path())
+        .env("SHELL", &shell)
+        .env("ROSTERY_TEST_FINDER", "1")
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&child.stdout);
+    assert!(child.status.success(), "{out}");
+    assert!(out.contains("1 passed"), "{out}");
+}
+
+#[test]
+#[ignore = "run by a_finder_launch_finds_claude_through_the_login_shell"]
+fn launched_like_finder() {
+    if std::env::var_os("ROSTERY_TEST_FINDER").is_none() {
+        return;
+    }
+    let path = llm::login_shell_path().unwrap();
+    assert!(path.contains("somewhere-only-the-shell-knows"), "{path}");
+    let reply = llm::complete(
+        &Provider::ClaudeCode { model: None },
+        &CompletionRequest {
+            system: SYSTEM.into(),
+            user: USER.into(),
+            schema: json!({}),
+        },
+        LONG_ENOUGH,
+    );
+    assert_eq!(reply.unwrap(), "hello");
+}
+
+/// Costs a little subscription use, so it only runs when asked for.
+#[test]
+#[ignore = "talks to the real claude CLI"]
+fn live_claude_roast() {
+    let _env = ENV.lock().unwrap_or_else(PoisonError::into_inner);
+    const NOW: i64 = 1_800_000_000;
+    let mut store = Store::open_in_memory().unwrap();
+    demo::load(&mut store, NOW).unwrap();
+    let digest = digest::from_store(&store, NOW).unwrap();
+
+    let started = Instant::now();
+    let roast = roast::generate(
+        &Provider::ClaudeCode {
+            model: Some("haiku".into()),
+        },
+        &digest,
+        roast::default_system_prompt(),
+        llm::DEFAULT_TIMEOUT,
+    )
+    .unwrap();
+
+    println!("took {:?}", started.elapsed());
+    println!("{}", serde_json::to_string_pretty(&roast).unwrap());
+    assert!(roast.burns.len() >= 3, "only {} Burns", roast.burns.len());
+    assert!(!roast.headline.is_empty() && !roast.verdict.archetype.is_empty());
+}

@@ -85,6 +85,15 @@ fn within_cap(mut ranked: Vec<Ranked>, filter: UniverseFilter) -> Vec<Ranked> {
     ranked
 }
 
+/// How long a Play counts for. Takeout has no durations, so a watch gets an estimate.
+pub fn play_ms(p: &Play) -> i64 {
+    match p.duration_ms {
+        Some(ms) => ms.max(0),
+        None if p.source == Source::Youtube => WATCH_MS,
+        None => 0,
+    }
+}
+
 /// The heaviest Creators as Planets, heaviest first, with no position or Galaxy yet.
 pub fn planets(input: &UniverseInput, filter: UniverseFilter) -> Vec<Planet> {
     let mut tallies: HashMap<(Source, &str), Tally> = HashMap::new();
@@ -94,11 +103,7 @@ pub fn planets(input: &UniverseInput, filter: UniverseFilter) -> Vec<Planet> {
             continue;
         }
         let t = tallies.entry((p.source, &p.creator)).or_default();
-        t.ms += match p.duration_ms {
-            Some(ms) => ms.max(0),
-            None if p.source == Source::Youtube => WATCH_MS,
-            None => 0,
-        };
+        t.ms += play_ms(p);
         if t.url.is_none() {
             t.url = p
                 .creator_ref

@@ -12,6 +12,9 @@ pub enum Error {
     /// A file the user picked. The message already says what to do next.
     #[error("{0}")]
     Import(String),
+    /// A Provider or a Roast went wrong. The message already says what to do next.
+    #[error("{0}")]
+    Provider(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

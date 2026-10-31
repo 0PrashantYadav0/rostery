@@ -2,9 +2,12 @@
 //! No UI, keychain or async runtime lives here.
 
 pub mod demo;
+pub mod digest;
 pub mod error;
 pub mod ingest;
+pub mod llm;
 pub mod model;
+pub mod roast;
 pub mod store;
 pub mod universe;
 
