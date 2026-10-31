@@ -6,6 +6,7 @@
   let { importing, missedError, stored }: { importing: boolean; missedError: string; stored: number } = $props();
 
   const FILTERS: UniverseFilter[] = ['both', 'spotify', 'youtube'];
+  const NO_BROWSER = 'Rostery could not open your browser. Check that you have a default browser set, then try again.';
 
   let universes = $state.raw<Partial<Record<UniverseFilter, Universe>>>();
   let error = $state('');
@@ -36,7 +37,11 @@
 
   function openLink(url: string) {
     error = '';
-    openSourceLink(url).catch((e) => (error = errorMessage(e)));
+    openSourceLink(url).catch((e) => {
+      // The opener's own words are about scopes and system calls, so they go to the log.
+      console.error(e);
+      error = NO_BROWSER;
+    });
   }
 </script>
 

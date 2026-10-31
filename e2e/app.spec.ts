@@ -1633,11 +1633,15 @@ test('a Source link opens in the system browser and leaves the window alone', as
   await expect(panel(page)).toBeVisible();
 });
 
-test('a link the opener refuses says so', async ({ page }) => {
+test('a link the opener refuses says what to do, not what the plugin said', async ({ page }) => {
+  // tauri-plugin-opener's own words for a URL outside the capability's scope.
+  const refusal = 'Not allowed to open url https://open.spotify.com/artist/abc';
+  const logged: string[] = [];
+  page.on('console', (message) => logged.push(message.text()));
   await installMockIpc(page, {
     ...withUniverse(detailed()),
     'plugin:opener|open_url': () => {
-      throw new Error('Rostery could not open your browser.');
+      throw new Error(refusal);
     },
   });
   await openUniverse(page);
@@ -1645,7 +1649,10 @@ test('a link the opener refuses says so', async ({ page }) => {
   await page.getByRole('button', { name: /Moth Season/ }).click();
 
   await panel(page).getByRole('link', { name: 'Open in Spotify' }).click();
-  await expect(page.getByRole('alert')).toContainText('could not open your browser');
+  await expect(page.getByRole('alert')).toHaveText('Rostery could not open your browser. Check that you have a default browser set, then try again.');
+  await expect(page.getByText('Not allowed to open url')).toHaveCount(0);
+  // Whoever reads the log still gets the reason.
+  expect(logged.join('\n')).toContain(refusal);
 });
 
 test('a Planet with no way back has no link, and says the right words when it has one', async ({ page }) => {
