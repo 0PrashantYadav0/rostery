@@ -21,15 +21,22 @@ export interface Placed {
   y: number;
 }
 
+export interface Rect extends Placed {
+  width: number;
+  height: number;
+}
+
 const GAP = 6;
 
+const overlap = (a: Rect, b: Rect) => a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+
 /**
- * Where each label goes, or null for one that would land on an earlier label or fall off the sky. Earlier
- * means more important, so a pile of Planets names only the largest. A label sits up and to the right of
- * its Planet, and flips to the left near the sky's right edge.
+ * Where each label goes, or null for one that would land on an earlier label, on `reserved`, or fall off
+ * the sky. Earlier means more important, so a pile of Planets names only the largest. A label sits up and
+ * to the right of its Planet, and flips to the left near the sky's right edge.
  */
-export function placeLabels(boxes: (LabelBox | null)[], width: number, height: number): (Placed | null)[] {
-  const taken: { x: number; y: number; width: number; height: number }[] = [];
+export function placeLabels(boxes: (LabelBox | null)[], width: number, height: number, reserved: Rect[] = []): (Placed | null)[] {
+  const taken = [...reserved];
   return boxes.map((box) => {
     if (!box) return null;
     const lean = box.radius * Math.SQRT1_2 + GAP;
@@ -37,10 +44,50 @@ export function placeLabels(boxes: (LabelBox | null)[], width: number, height: n
     const x = flip ? box.x - lean - box.width : box.x + lean;
     const y = box.y - lean - box.height / 2;
     const off = x < 0 || y < 0 || x + box.width > width || y + box.height > height;
-    const hit = taken.some((t) => x < t.x + t.width && t.x < x + box.width && y < t.y + t.height && t.y < y + box.height);
-    if (off || hit) return null;
-    taken.push({ x, y, width: box.width, height: box.height });
+    const here = { x, y, width: box.width, height: box.height };
+    if (off || taken.some((t) => overlap(here, t))) return null;
+    taken.push(here);
     return { x, y };
+  });
+}
+
+/**
+ * Where the hover tooltip goes. A name can be left out, but someone asked for this one, so it always gets a
+ * place in the sky, clear of `avoid` if there is any room for that. First beside its Planet, flipping away
+ * from an edge. Failing that, as near the Planet as it fits, beside whatever is in the way.
+ */
+export function placeTooltip(box: LabelBox, width: number, height: number, avoid: Rect[]): Placed {
+  const lean = box.radius * Math.SQRT1_2 + GAP;
+  const inSky = ({ x, y }: Placed): Placed => ({
+    x: Math.max(0, Math.min(x, width - box.width)),
+    y: Math.max(0, Math.min(y, height - box.height)),
+  });
+  const clear = (spot: Placed) => !avoid.some((r) => overlap({ ...spot, width: box.width, height: box.height }, r));
+
+  const around = [box.y - lean - box.height / 2, box.y + lean - box.height / 2].flatMap((y) =>
+    [box.x + lean, box.x - lean - box.width].map((x) => ({ x, y })),
+  );
+  const beside = around.find((spot) => clear(spot) && inSky(spot).x === spot.x && inSky(spot).y === spot.y);
+  if (beside) return beside;
+
+  const { x, y } = inSky(around[0]);
+  const past = avoid.flatMap((r) => [
+    { x, y: r.y + r.height + GAP },
+    { x, y: r.y - box.height - GAP },
+    { x: r.x + r.width + GAP, y },
+    { x: r.x - box.width - GAP, y },
+  ]);
+  const away = (spot: Placed) => Math.hypot(spot.x + box.width / 2 - box.x, spot.y + box.height / 2 - box.y);
+  const [nearest] = [...around, ...past].map(inSky).filter(clear).sort((a, b) => away(a) - away(b));
+  return nearest ?? { x, y };
+}
+
+/** The boxes UniverseView paints over the sky, in the sky's own pixels. */
+function coversOf(sky: HTMLElement): Rect[] {
+  const { left, top } = sky.getBoundingClientRect();
+  return [...sky.parentElement!.querySelectorAll('[data-covers-sky]')].map((node) => {
+    const r = node.getBoundingClientRect();
+    return { x: r.left - left, y: r.top - top, width: r.width, height: r.height };
   });
 }
 
@@ -132,18 +179,25 @@ export function createLabels(parent: HTMLElement) {
         label.height = label.element.offsetHeight;
       }
 
+      // A Planet can fill the view with its middle behind the camera, and it was still hovered.
+      const anchor = tooltip.planet && (project(tooltip.planet) ?? { x: width / 2, y: height / 2, radius: 0 });
+      const size = { width: tooltip.width, height: tooltip.height };
+      const tip = anchor ? placeTooltip({ ...anchor, ...size }, width, height, coversOf(parent)) : null;
+
+      const names = live.filter((label) => label !== tooltip);
       const placed = placeLabels(
-        live.map((label) => {
+        names.map((label) => {
           const at = project(label.planet!);
           return at && { ...at, width: label.width, height: label.height };
         }),
         width,
         height,
+        tip ? [{ ...tip, ...size }] : [],
       );
 
       for (const label of order) {
-        const index = live.indexOf(label);
-        const place = index < 0 ? null : placed[index];
+        const index = names.indexOf(label);
+        const place = label === tooltip ? tip : index < 0 ? null : placed[index];
         const shown = place !== null;
         if (shown !== label.shown) {
           label.element.hidden = !shown;

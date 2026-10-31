@@ -159,7 +159,7 @@
   <div class="layout">
     <div class="stage">
       <div class="bar">
-        <div class="title">
+        <div class="title" data-covers-sky>
           {@render children?.()}
           {#if universe}
             <p class="count">{describeUniverse(universe)}</p>
@@ -168,7 +168,7 @@
           {/if}
         </div>
         {#if universe}
-          <div class="controls">
+          <div class="controls" data-covers-sky>
             <!-- A WebKit webview skips a button on Tab unless it has a tabindex. -->
             <div class="tabs" role="group" aria-label="Which Source to show">
               {#each filters as option (option)}
@@ -181,7 +181,7 @@
           </div>
         {/if}
         {#if notice}
-          <p class="notice" role="alert">{notice}</p>
+          <p class="notice" role="alert" data-covers-sky>{notice}</p>
         {/if}
       </div>
 
@@ -193,7 +193,7 @@
       {/if}
 
       {#if universe && !showList && !selected}
-        <details class="legend" open={roomy}>
+        <details class="legend" open={roomy} data-covers-sky>
           <summary>Galaxies</summary>
           <ul>
             {#each legend.slice(0, LEGEND_GALAXIES) as galaxy (galaxy.id)}

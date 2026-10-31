@@ -870,6 +870,89 @@ test('hovering a Planet shows a tooltip, and leaving it takes it away', async ({
   await expect(tooltip).toBeHidden();
 });
 
+/** Moves over the whole sky at once. Every spot a hover lands on, what was wrong with its tooltip. */
+const hoverEverywhere = (page: Page) =>
+  page.evaluate(() => {
+    const canvas = document.querySelector('canvas')!;
+    const sky = canvas.getBoundingClientRect();
+    const covers = [...document.querySelectorAll('.title, .controls, .notice, .legend')].map((node) => node.getBoundingClientRect());
+    const tip = document.querySelector<HTMLElement>('.label.tooltip')!;
+    const problems: string[] = [];
+    let hovers = 0;
+    for (let y = sky.top + 1; y < sky.bottom; y += 12) {
+      for (let x = sky.left + 1; x < sky.right; x += 12) {
+        canvas.dispatchEvent(new PointerEvent('pointermove', { clientX: x, clientY: y, pointerType: 'mouse' }));
+        if (canvas.style.cursor !== 'pointer') continue;
+        hovers += 1;
+        const at = tip.getBoundingClientRect();
+        if (tip.hidden) problems.push(`hidden at ${x},${y}`);
+        else if (at.left < sky.left || at.top < sky.top || at.right > sky.right || at.bottom > sky.bottom) problems.push(`off the sky at ${x},${y}`);
+        else if (covers.some((c) => at.left < c.right && c.left < at.right && at.top < c.bottom && c.top < at.bottom)) problems.push(`under a box at ${x},${y}`);
+      }
+    }
+    canvas.dispatchEvent(new PointerEvent('pointerleave'));
+    return { hovers, problems };
+  });
+
+/** Planets all the way round the edge of the view, so some are behind each box over the sky. */
+function rim(count: number): Universe {
+  const sky = universe();
+  const planets = Array.from({ length: count }, (_, i): Planet => {
+    const turn = (i / count) * 2 * Math.PI;
+    return { ...sky.planets[i % 2], id: i, name: `Creator ${i}`, radius: 5, position: [100 * Math.cos(turn), 100 * Math.sin(turn), 0], galaxy: i % 2 };
+  });
+  return { ...sky, planets, links: [] };
+}
+
+test('wherever a Planet is hovered, its tooltip is in the sky and clear of the boxes', async ({ page }) => {
+  await installMockIpc(page, withUniverse(rim(60)));
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await openUniverse(page);
+  await expect(page.locator('canvas')).toBeVisible();
+  await settled(page);
+
+  for (const [width, height] of [[1200, 800], [800, 600], [640, 480]]) {
+    await page.setViewportSize({ width, height });
+    await settled(page);
+    await settled(page);
+    const { hovers, problems } = await hoverEverywhere(page);
+    expect(hovers, `nothing was hovered at ${width}x${height}`).toBeGreaterThan(20);
+    expect(problems, `at ${width}x${height}`).toEqual([]);
+  }
+});
+
+test('a Planet hovered from close up still gets its tooltip', async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await installMockIpc(page, withUniverse(crowd(60)));
+  await openUniverse(page);
+  const canvas = page.locator('canvas');
+  await expect(canvas).toBeVisible();
+  await settled(page);
+  await page.getByRole('button', { name: 'Show list' }).click();
+  await page.getByRole('button', { name: /Creator 0\b/ }).click();
+  await page.getByRole('button', { name: 'Show 3D view' }).click();
+  await settled(page);
+  await settled(page);
+
+  const box = (await canvas.boundingBox())!;
+  const tooltip = page.locator('.label.tooltip');
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await expect(tooltip).toContainText('Creator 0');
+  for (let step = 0; step < 4; step += 1) {
+    await page.mouse.wheel(0, -240);
+    await settled(page);
+    await settled(page);
+    await page.mouse.move(box.x + box.width / 2 + step, box.y + box.height / 2);
+    await expect(canvas).toHaveCSS('cursor', 'pointer');
+    await expect(tooltip, `after ${step + 1} wheel steps`).toBeVisible();
+    const at = (await tooltip.boundingBox())!;
+    expect(at.x, 'left edge').toBeGreaterThanOrEqual(box.x);
+    expect(at.y, 'top edge').toBeGreaterThanOrEqual(box.y);
+    expect(at.x + at.width, 'right edge').toBeLessThanOrEqual(box.x + box.width);
+    expect(at.y + at.height, 'bottom edge').toBeLessThanOrEqual(box.y + box.height);
+  }
+});
+
 test('dragging turns the Universe and does not pick a Planet', async ({ page }) => {
   await page.setViewportSize({ width: 1000, height: 700 });
   await installMockIpc(page, withUniverse(onePlanet()));

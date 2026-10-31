@@ -13,7 +13,7 @@ import {
   sourceUrl,
   topLabelIds,
 } from './scene-data';
-import { placeLabels, type LabelBox } from './labels';
+import { placeLabels, placeTooltip, type LabelBox } from './labels';
 import type { Planet, Source, Universe } from '../shared/types';
 
 function planet(id: number, radius: number, source: Source = 'spotify', position: Planet['position'] = [0, 0, 0]): Planet {
@@ -334,5 +334,59 @@ describe('placeLabels', () => {
     const [behind, seen] = placeLabels([null, box(100, 100)], 500, 500);
     expect(behind).toBeNull();
     expect(seen).not.toBeNull();
+  });
+
+  it('keeps clear of what is already placed', () => {
+    expect(placeLabels([box(100, 100)], 500, 500, [{ x: 0, y: 0, width: 500, height: 500 }])).toEqual([null]);
+  });
+});
+
+describe('placeTooltip', () => {
+  const box = (x: number, y: number, radius = 0, width = 100, height = 20): LabelBox => ({ x, y, radius, width, height });
+  const inSky = (spot: { x: number; y: number }, width = 500, height = 500, tip = box(0, 0)) =>
+    spot.x >= 0 && spot.y >= 0 && spot.x + tip.width <= width && spot.y + tip.height <= height;
+  const clearOf = (spot: { x: number; y: number }, r: { x: number; y: number; width: number; height: number }) =>
+    !(spot.x < r.x + r.width && r.x < spot.x + 100 && spot.y < r.y + r.height && r.y < spot.y + 20);
+
+  it('goes up and to the right of its Planet, like any other label', () => {
+    expect(placeTooltip(box(100, 100, 20), 500, 500, [])).toEqual(placeLabels([box(100, 100, 20)], 500, 500)[0]);
+  });
+
+  it('flips below a Planet at the top of the sky', () => {
+    const spot = placeTooltip(box(100, 2, 10), 500, 500, []);
+    expect(inSky(spot)).toBe(true);
+    expect(spot.y).toBeGreaterThan(2);
+  });
+
+  it('flips to the left near the right edge', () => {
+    expect(placeTooltip(box(460, 100, 10), 500, 500, []).x + 100).toBeLessThan(460);
+  });
+
+  it('stays in the sky for a Planet too close to fit, or partly out of it', () => {
+    expect(inSky(placeTooltip(box(250, 250, 2000), 500, 500, []))).toBe(true);
+    expect(inSky(placeTooltip(box(-300, 900, 40), 500, 500, []))).toBe(true);
+  });
+
+  it('goes beside a box in the way, staying near its Planet', () => {
+    const title = { x: 30, y: 20, width: 300, height: 100 };
+    const spot = placeTooltip(box(100, 60, 10), 500, 500, [title]);
+    expect(inSky(spot)).toBe(true);
+    expect(clearOf(spot, title)).toBe(true);
+    expect(spot.y).toBeLessThan(160);
+  });
+
+  it('finds the one clear corner when a close Planet leaves it nowhere nearer', () => {
+    const boxes = [
+      { x: 0, y: 0, width: 300, height: 100 },
+      { x: 300, y: 0, width: 200, height: 40 },
+      { x: 0, y: 300, width: 240, height: 200 },
+    ];
+    const spot = placeTooltip(box(250, 250, 2000), 500, 500, boxes);
+    expect(inSky(spot)).toBe(true);
+    for (const b of boxes) expect(clearOf(spot, b)).toBe(true);
+  });
+
+  it('still has a place in the sky when every spot is covered', () => {
+    expect(inSky(placeTooltip(box(100, 100), 500, 500, [{ x: 0, y: 0, width: 500, height: 500 }]))).toBe(true);
   });
 });
