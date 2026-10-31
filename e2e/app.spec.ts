@@ -1514,6 +1514,57 @@ test('the panel says why Planets are linked, and opens a neighbour from there', 
   await expect(panel(page)).toContainText('2 watches on YouTube');
 });
 
+test('following a Linked Planet from down the panel shows its name, with the focus on it', async ({ page }) => {
+  const sky = detailed();
+  // Both tall enough to scroll, so the panel's new content cannot pull the scroll back by being short.
+  for (const planet of [sky.planets[0], sky.planets[2]]) {
+    planet.topItems = Array.from({ length: 14 }, (_, i) => ({ title: `Track ${i}`, url: null, plays: 20 - i }));
+  }
+  await installMockIpc(page, withUniverse(sky));
+
+  for (const [width, height] of [[640, 480], [1200, 500]]) {
+    await page.setViewportSize({ width, height });
+    await openUniverse(page);
+    await page.getByRole('button', { name: 'Show list' }).click();
+    await page.getByRole('button', { name: /Moth Season/ }).click();
+
+    const aside = panel(page);
+    const link = aside.getByRole('button', { name: /Velvet Anchor/ });
+    await aside.evaluate((node) => (node.scrollTop = node.scrollHeight));
+    await link.scrollIntoViewIfNeeded();
+    expect(await aside.evaluate((node) => node.scrollTop), 'the panel has scrolled').toBeGreaterThan(0);
+    await link.click();
+
+    const heading = aside.getByRole('heading', { level: 2 });
+    await expect(heading).toHaveText('Velvet Anchor');
+    await expect(heading).toBeFocused();
+    const [name, box] = [(await heading.boundingBox())!, (await aside.boundingBox())!];
+    expect(name.y, `the name is above the panel at ${width}x${height}`).toBeGreaterThanOrEqual(box.y);
+    expect(name.y + name.height, `the name is below the panel at ${width}x${height}`).toBeLessThanOrEqual(box.y + box.height);
+  }
+});
+
+test('a right to left name stays clear of the close button', async ({ page }) => {
+  const sky = detailed();
+  sky.planets[0].name = 'موسيقى الليل الطويل جدا '.repeat(3);
+  await installMockIpc(page, withUniverse(sky));
+
+  for (const [width, height] of [[1200, 800], [640, 480]]) {
+    await page.setViewportSize({ width, height });
+    await openUniverse(page);
+    await page.getByRole('button', { name: 'Show list' }).click();
+    await page.getByRole('button', { name: /موسيقى/ }).click();
+
+    const hits = await panel(page).evaluate((aside) => {
+      const close = aside.querySelector('.close')!.getBoundingClientRect();
+      const words = document.createRange();
+      words.selectNodeContents(aside.querySelector('h2')!);
+      return [...words.getClientRects()].filter((r) => r.left < close.right && close.left < r.right && r.top < close.bottom && close.top < r.bottom).length;
+    });
+    expect(hits, `at ${width}x${height}`).toBe(0);
+  }
+});
+
 test('Escape closes the panel and returns focus to the list item', async ({ page }) => {
   await installMockIpc(page, withUniverse(detailed()));
   await openUniverse(page);

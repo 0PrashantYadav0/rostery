@@ -29,11 +29,14 @@
   const items = $derived(showItems ? planet.topItems : []);
   const who = $derived(`${planet.source} ${planet.name}`);
 
+  let panel = $state<HTMLElement>();
   let heading = $state<HTMLElement>();
   // The panel's content changes without a page load, so a keyboard or screen reader needs to be told. Only
   // for a different Planet, because new data for this one should not pull focus away from where it is.
+  // It stays on the page between Planets, so it has to come back up, or the new name is out of sight.
   $effect(() => {
     who;
+    if (panel) panel.scrollTop = 0;
     heading?.focus({ preventScroll: true });
   });
 
@@ -48,7 +51,7 @@
   <a class={className} href={url} tabindex="0" target="_blank" rel="noopener noreferrer" dir="auto" onclick={(e) => follow(e, url)}>{text}</a>
 {/snippet}
 
-<aside class="panel" aria-labelledby="planet-panel-name">
+<aside class="panel" aria-labelledby="planet-panel-name" bind:this={panel}>
   <header>
     <h2 id="planet-panel-name" dir="auto" tabindex="-1" bind:this={heading}>{planet.name}</h2>
     <!-- After the heading, so it is the first stop from there. A WebKit webview skips a button on Tab without tabindex. -->
@@ -133,7 +136,7 @@
 
   .close {
     position: absolute;
-    inset-inline-end: -8px;
+    right: -8px;
     top: -6px;
     display: grid;
     place-items: center;
@@ -159,7 +162,8 @@
     line-clamp: 4;
     overflow: hidden;
     margin: 0;
-    padding-inline-end: 26px;
+    /* The right, not the end, because a name can run either way and the button stays where it is. */
+    padding-right: 26px;
     font: 500 28px/1.15 var(--serif);
     outline: none;
   }
