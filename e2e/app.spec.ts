@@ -84,6 +84,7 @@ test('import summary appears', async ({ page }) => {
     excludedAds: 0,
     rejected: 0,
     skippedReason: null,
+    demoPlaysRemoved: 0,
   };
   await installMockIpc(page, {
     totals: () => stored,
@@ -135,6 +136,7 @@ const nothing: ImportSummary = {
   excludedAds: 0,
   rejected: 0,
   skippedReason: null,
+  demoPlaysRemoved: 0,
 };
 const empty = { totals: () => ({ spotify: none, youtube: none }), has_demo_data: () => false };
 
@@ -188,6 +190,26 @@ async function dragFile(page: Page) {
     await expect(page.locator('.import')).toHaveClass(/over/, { timeout: 100 });
   }).toPass();
 }
+
+test('importing real history takes the demo data away and says so', async ({ page }) => {
+  let demo = true;
+  await installMockIpc(page, {
+    totals: () => ({ spotify: none, youtube: none }),
+    has_demo_data: () => demo,
+    'plugin:dialog|open': () => ['/d/my_spotify_data.zip'],
+    import_paths: () => {
+      demo = false;
+      return { ...nothing, filesRead: 1, added: 5, demoPlaysRemoved: 1937 };
+    },
+  });
+
+  await page.goto('/');
+  await expect(page.getByRole('button', { name: 'Clear demo data' })).toBeVisible();
+  await page.getByRole('button', { name: 'Choose file' }).click();
+
+  await expect(page.getByRole('status')).toHaveText('Added 5 Plays. Removed the demo data, so only your real history is left.');
+  await expect(page.getByRole('button', { name: 'Clear demo data' })).toBeHidden();
+});
 
 test('a file dropped during an import is not silently ignored', async ({ page }) => {
   const imported: unknown[] = [];

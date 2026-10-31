@@ -1,5 +1,6 @@
 //! Importing a Spotify Export. Every name and address here is invented.
 
+use rostery_core::demo;
 use rostery_core::ingest::{import_path, import_paths, ImportSummary};
 use rostery_core::model::{Origin, Play, Source};
 use rostery_core::store::Store;
@@ -1062,4 +1063,56 @@ fn format_ts(secs: i64) -> String {
         rem % 3600 / 60,
         rem % 60
     )
+}
+
+/// A store holding the demo, and an Export file with one real Play in it.
+fn demo_store_and_export() -> (Store, TempDir, PathBuf) {
+    let mut store = Store::open_in_memory().unwrap();
+    demo::load(&mut store, 1_800_000_000).unwrap();
+    let dir = TempDir::new().unwrap();
+    let rows = json!([extended(
+        "2024-03-01T13:05:42Z",
+        "Real Band",
+        "Real Song",
+        200_000
+    )]);
+    let file = write_json(dir.path(), "Streaming_History_Audio_2024_0.json", &rows);
+    (store, dir, file)
+}
+
+#[test]
+fn real_history_removes_demo_data() {
+    let (mut store, _dir, file) = demo_store_and_export();
+    let demo_plays = store.plays(None).unwrap().len() as u64;
+    assert!(store.has_demo_data().unwrap());
+
+    let summary = import_path(&mut store, &file).unwrap();
+
+    assert_eq!(summary.added, 1);
+    assert_eq!(summary.demo_plays_removed, demo_plays);
+    assert!(!store.has_demo_data().unwrap());
+    assert!(store.interests().unwrap().is_empty());
+    let left = store.plays(None).unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].origin, Origin::Export);
+}
+
+#[test]
+fn an_import_that_adds_nothing_leaves_demo_data_alone() {
+    let (mut store, _dir, file) = demo_store_and_export();
+    import_path(&mut store, &file).unwrap();
+    demo::load(&mut store, 1_800_000_000).unwrap();
+
+    let again = import_path(&mut store, &file).unwrap();
+
+    assert_eq!((again.added, again.demo_plays_removed), (0, 0));
+    assert!(store.has_demo_data().unwrap());
+}
+
+#[test]
+fn an_import_that_fails_leaves_demo_data_alone() {
+    let (mut store, dir, _file) = demo_store_and_export();
+    let notes = write_json(dir.path(), "notes.json", &json!({"not": "history"}));
+    assert!(import_path(&mut store, &notes).is_err());
+    assert!(store.has_demo_data().unwrap());
 }

@@ -25,6 +25,7 @@ export interface ImportSummary {
   excludedAds: number;
   rejected: number;
   skippedReason: string | null;
+  demoPlaysRemoved: number;
 }
 
 export type UniverseFilter = Source | 'both';

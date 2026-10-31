@@ -50,6 +50,8 @@ pub struct ImportSummary {
     pub rejected: u64,
     /// Why the first skipped file was left out, for when the import still found other files.
     pub skipped_reason: Option<String>,
+    /// Demo Plays that made way for this real history.
+    pub demo_plays_removed: u64,
 }
 
 /// Looks only at the first 4 KB of a file.
@@ -116,6 +118,10 @@ pub fn import_paths(store: &mut Store, paths: &[impl AsRef<Path>]) -> Result<Imp
     // Net of what private rows took back out, so `added` matches what the dials gain.
     run.summary.added = run.summary.added.saturating_sub(run.removed_private);
     run.summary.skipped_reason = run.first_skip.map(|e| e.to_string());
+    // A Roast of made-up Plays mixed with real ones would be wrong, so real history takes over.
+    if run.summary.added > 0 {
+        run.summary.demo_plays_removed = run.store.delete_demo()?;
+    }
     Ok(run.summary)
 }
 

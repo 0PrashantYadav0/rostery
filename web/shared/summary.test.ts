@@ -11,6 +11,7 @@ const noImport: ImportSummary = {
   excludedAds: 0,
   rejected: 0,
   skippedReason: null,
+  demoPlaysRemoved: 0,
 };
 
 describe('describeImport', () => {
@@ -26,6 +27,12 @@ describe('describeImport', () => {
     ).toBe(
       'Added 1 Play. 1 Play was already here. Skipped 1 private session. Skipped 1 ad. ' +
         'Left out 1 row Rostery could not use.',
+    );
+  });
+
+  it('says when real history took the place of the demo data', () => {
+    expect(describeImport({ ...noImport, added: 2, demoPlaysRemoved: 1937 })).toBe(
+      'Added 2 Plays. Removed the demo data, so only your real history is left.',
     );
   });
 

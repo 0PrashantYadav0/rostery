@@ -109,7 +109,7 @@ Two rules keep Origins consistent. When an Export is imported and every file in 
 
 Private sessions (`incognito_mode: true`) and Google ads (`details` holding "From Google Ads") are dropped at ingest and counted in the import summary. Spotify's account format has no private flag, so an extended private row also removes the account copy of that Play, whether it is already stored or comes later in the same import. An account file imported on its own after the extended one cannot be caught, because remembering private Plays would mean writing them to disk. A YouTube video that has since been deleted has no `subtitles`, and a removed one has no link either. It is kept with an empty Creator because it makes a good joke, and it never becomes a Planet. A Takeout row is a Play only when it links to a watch or Shorts video, or to nothing. Searches, subscriptions, likes, community posts and other Google products in the same file are ignored without counting as rejected.
 
-Clearing demo data removes demo Plays, demo Interests and demo Affinities in one transaction. Affinities have no Origin column, so a demo one has the kind `demo`.
+Clearing demo data removes demo Plays, demo Interests and demo Affinities in one transaction. Affinities have no Origin column, so a demo one has the kind `demo`. An import that adds at least one Play does this by itself and says so in its summary, and a Connection's sync will do the same, because a Roast of made-up Plays mixed with real ones would be wrong.
 
 ## Universe
 
