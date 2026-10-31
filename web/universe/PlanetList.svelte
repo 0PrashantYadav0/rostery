@@ -11,10 +11,16 @@
 
   const planets = $derived(bySize(universe.planets));
   const galaxy = (planet: Planet) => universe.galaxies[planet.galaxy];
+
+  let list = $state<HTMLElement>();
+  // A panel opening takes room from this list, and a Linked Planet can be anywhere in it.
+  $effect(() => {
+    if (selectedId !== undefined) list?.querySelector(`[data-planet="${selectedId}"]`)?.scrollIntoView({ block: 'nearest' });
+  });
 </script>
 
 <!-- role is not redundant here: Safari and a WebKit webview drop a list's meaning along with its bullets. -->
-<ol class="list" role="list" aria-label="Planets, largest first">
+<ol class="list" role="list" aria-label="Planets, largest first" bind:this={list}>
   {#each planets as planet (planet.id)}
     <li>
       <!-- A WebKit webview skips a button on Tab unless it has a tabindex. -->
@@ -96,7 +102,8 @@
     font: italic 14px/1.3 var(--serif);
   }
 
-  @media (max-width: 720px) {
+  /* The list's own width, because the room it has depends on the panel as much as on the window. */
+  @container (max-width: 600px) {
     button {
       grid-template-columns: 22px minmax(0, 1fr) auto;
       padding: 9px 16px;

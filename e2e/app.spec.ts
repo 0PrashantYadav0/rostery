@@ -833,6 +833,9 @@ async function clickMiddleOfSky(page: Page) {
 
 const panel = (page: Page) => page.getByRole('complementary');
 
+type Box = { x: number; y: number; width: number; height: number };
+const overlaps = (a: Box, b: Box) => a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+
 test('clicking a Planet opens its panel, and clicking empty sky does not', async ({ page }) => {
   await page.setViewportSize({ width: 1000, height: 700 });
   await installMockIpc(page, withUniverse(onePlanet()));
@@ -1938,12 +1941,113 @@ test('labels never overlap the panel on small windows', async ({ page }) => {
     expect(side.height).toBeGreaterThan(0);
     const labels = await page.locator('.label:visible').evaluateAll((nodes) => nodes.map((n) => n.getBoundingClientRect().toJSON()));
     for (const box of labels) {
-      const hit = box.left < side.x + side.width && side.x < box.right && box.top < side.y + side.height && side.y < box.bottom;
-      expect(hit, `a label at ${box.left},${box.top} is on the panel at ${width}x${height}`).toBe(false);
+      expect(overlaps(box, side), `a label at ${box.left},${box.top} is on the panel at ${width}x${height}`).toBe(false);
     }
+    expect(overlaps((await page.locator('.bar').boundingBox())!, side), `the words are on the panel at ${width}x${height}`).toBe(false);
     // And there is no way for the page itself to scroll sideways.
     const sideways = await page.evaluate(() => document.querySelector('main')!.scrollWidth - document.querySelector('main')!.clientWidth);
     expect(sideways).toBeLessThanOrEqual(0);
+  }
+});
+
+test('the words over the sky stay off the panel on short windows, however much they have to say', async ({ page }) => {
+  await installMockIpc(page, {
+    ...withUniverse(detailed()),
+    'plugin:dialog|open': () => ['/d/my_spotify_data.zip'],
+    import_paths: () => new Promise(() => {}),
+    'plugin:opener|open_url': () => {
+      throw new Error('No application knows how to open this URL');
+    },
+  });
+
+  for (const [width, height] of [[640, 480], [720, 520], [640, 560], [800, 600]]) {
+    await page.setViewportSize({ width, height });
+    await page.goto('/');
+    await page.getByRole('button', { name: 'Choose file' }).click();
+    await page.getByRole('button', { name: 'Universe' }).click();
+    await expect(page.getByRole('status')).toContainText('Reading your history');
+    await page.getByRole('button', { name: 'Show list' }).click();
+    await page.getByRole('button', { name: /Moth Season/ }).click();
+    await page.getByRole('button', { name: 'Show 3D view' }).click();
+    await settled(page);
+
+    const bar = page.locator('.bar');
+    const aside = panel(page);
+    const expectRoomForAll = async (when: string) => {
+      const [words, side, sky] = [(await bar.boundingBox())!, (await aside.boundingBox())!, (await page.locator('.sky').boundingBox())!];
+      expect(overlaps(words, side), `the words are on the panel at ${width}x${height} ${when}`).toBe(false);
+      expect(overlaps(words, sky), `the words are on the sky at ${width}x${height} ${when}`).toBe(false);
+      expect(sky.height, `the sky has no room at ${width}x${height} ${when}`).toBeGreaterThanOrEqual(80);
+      expect(side.height, `the panel has no room at ${width}x${height} ${when}`).toBeGreaterThanOrEqual(100);
+    };
+    await expectRoomForAll('during an import');
+    const name = await aside.getByRole('heading', { level: 2 }).evaluate((h2) => {
+      const { left, top, width, height } = h2.getBoundingClientRect();
+      return document.elementFromPoint(left + width / 2, top + height / 2) === h2;
+    });
+    expect(name, `the name is covered at ${width}x${height}`).toBe(true);
+
+    await aside.getByRole('link', { name: 'Open in Spotify' }).click();
+    const alert = page.getByRole('alert');
+    await expect(alert).toContainText('could not open your browser');
+    await expectRoomForAll('after a link failed');
+    // The failure is on screen without scrolling the words.
+    const [said, words] = [(await alert.boundingBox())!, (await bar.boundingBox())!];
+    expect(said.y + said.height, `the failure is cut off at ${width}x${height}`).toBeLessThanOrEqual(words.y + words.height);
+  }
+});
+
+/** With a Planet open on the app's smallest window, the list still shows whole rows and the row it opened from. */
+async function expectListBesidePanel(page: Page) {
+  const list = page.getByRole('list', { name: 'Planets, largest first' });
+  await list.getByRole('button', { name: /Binary Tide/ }).click();
+  const aside = panel(page);
+  const heading = aside.getByRole('heading', { level: 2 });
+  await expect(heading).toBeFocused();
+
+  const scroll = (await page.locator('.scroll').boundingBox())!;
+  const chosen = (await list.locator('[aria-current="true"]').boundingBox())!;
+  expect(scroll.height, 'not one whole row shows').toBeGreaterThanOrEqual(chosen.height);
+  expect(chosen.y, 'the chosen row is above the list').toBeGreaterThanOrEqual(scroll.y - 1);
+  expect(chosen.y + chosen.height, 'the chosen row is below the list').toBeLessThanOrEqual(scroll.y + scroll.height + 1);
+  expect(overlaps((await page.locator('.bar').boundingBox())!, (await aside.boundingBox())!), 'the words are on the panel').toBe(false);
+
+  // Back up into the list by keyboard, and the row that gets the focus can be seen.
+  await page.keyboard.press('Shift+Tab');
+  const focused = (await page.locator('[data-planet]:focus').boundingBox())!;
+  expect(focused.y, 'the focused row is above the list').toBeGreaterThanOrEqual(scroll.y - 1);
+  expect(focused.y + focused.height, 'the focused row is below the list').toBeLessThanOrEqual(scroll.y + scroll.height + 1);
+}
+
+test('without WebGL on a small window, the list stays beside an open Planet', async ({ page }) => {
+  await noWebGL(page);
+  await installMockIpc(page, withUniverse(detailed()));
+  await page.setViewportSize({ width: 640, height: 480 });
+  await openUniverse(page);
+  await expect(page.getByRole('alert')).toContainText('could not start 3D drawing');
+  await expectListBesidePanel(page);
+});
+
+test('the list view on a small window stays beside an open Planet', async ({ page }) => {
+  await installMockIpc(page, withUniverse(detailed()));
+  await page.setViewportSize({ width: 640, height: 480 });
+  await openUniverse(page);
+  await page.getByRole('button', { name: 'Show list' }).click();
+  await expectListBesidePanel(page);
+});
+
+test('names in the list keep their room beside the panel', async ({ page }) => {
+  await installMockIpc(page, withUniverse(detailed()));
+  await page.setViewportSize({ width: 1200, height: 700 });
+  await openUniverse(page);
+  await page.getByRole('button', { name: 'Show list' }).click();
+  await page.getByRole('button', { name: /Moth Season/ }).click();
+
+  for (const width of [850, 900, 950, 1000, 1100, 1200]) {
+    await page.setViewportSize({ width, height: 700 });
+    await settled(page);
+    const name = await page.locator('.list .name').first().evaluate((node) => node.getBoundingClientRect().width);
+    expect(name, `at a window ${width}px wide`).toBeGreaterThanOrEqual(150);
   }
 });
 

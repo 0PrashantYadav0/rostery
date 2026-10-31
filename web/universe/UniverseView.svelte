@@ -273,6 +273,7 @@
   }
 
   .scroll {
+    container-type: inline-size;
     flex: 1;
     min-height: 0;
     overflow-y: auto;
@@ -493,21 +494,40 @@
     gap: 9px;
   }
 
-  /* A narrow window has room for the panel only under the sky. */
+  /*
+   * A narrow window has room for the panel only under the sky, and none to lay anything over anything else.
+   * So it is one column: the words, the sky or list, the panel. The words scroll past a limit, the sky or
+   * list always keeps some room, and the panel, which scrolls anyway, gives way to them. The list needs the
+   * room more than a sky does, because it is how someone gets to the next Planet.
+   */
   @container (max-width: 720px) {
     .layout {
       flex-direction: column;
     }
+    .stage {
+      flex: 1 0 auto;
+    }
     .side {
+      flex: 0 1 min(62cqh, 420px);
       width: 100%;
-      height: min(62cqh, 420px);
+    }
+    .listing .side {
+      flex-basis: min(40cqh, 420px);
+    }
+    .sky,
+    .scroll {
+      flex: 1 1 100px;
     }
     .side :global(.panel) {
       border-inline-start: 0;
       border-top: 1px solid var(--rule);
     }
     .bar {
-      inset: 9px 9px auto 9px;
+      position: static;
+      max-height: 45cqh;
+      padding: 9px;
+      overflow-y: auto;
+      pointer-events: auto;
     }
     .listing .bar {
       padding: 9px;
