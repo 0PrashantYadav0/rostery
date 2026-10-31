@@ -134,8 +134,9 @@
     const id = selected?.id;
     selectedKey = undefined;
     handle?.select(null);
-    handle?.frameAll();
+    // After the panel has left the page, so the view is framed for the sky it leaves behind.
     await tick();
+    handle?.frameAll();
     const target = showList
       ? (root?.querySelector<HTMLElement>(`[data-planet="${id}"]`) ?? root?.querySelector<HTMLElement>('[data-planet]'))
       : host?.querySelector('canvas');

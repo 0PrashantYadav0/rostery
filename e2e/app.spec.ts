@@ -1270,12 +1270,17 @@ test('finishing an import keeps the canvas and the camera, and swaps nothing els
   await page.mouse.move(box.x + 420, box.y + 260, { steps: 4 });
   await page.mouse.up();
 
-  // A sky that has been let go drifts on for a moment, and that is not what this test is about.
+  // A sky that has been let go drifts on for a moment, and that is not what this test is about. It slows by
+  // the frame, not by the clock, and a busy machine can go 400 ms without one, so this counts frames.
   const label = page.locator('.label', { hasText: 'Moth Season' });
   const where = () => label.evaluate((node) => (node as HTMLElement).style.transform);
   await expect(async () => {
     const start = await where();
-    await page.waitForTimeout(400);
+    await page.evaluate(() => new Promise((done) => {
+      let left = 30;
+      const step = () => (left-- ? requestAnimationFrame(step) : done(null));
+      step();
+    }));
     expect(await where()).toBe(start);
   }).toPass();
   const before = await where();
@@ -1547,6 +1552,85 @@ test('Escape closes the panel and returns focus to the canvas', async ({ page })
   await panel(page).getByRole('button', { name: 'Close Planet details' }).click();
   await expect(panel(page)).toHaveCount(0);
   await expect(canvas).toBeFocused();
+});
+
+/** Where each top label is. The same camera puts every one of them in the same place. */
+const topLabels = (page: Page) =>
+  page.locator('.label:not(.tooltip, .chosen):visible').evaluateAll((nodes) =>
+    Object.fromEntries(nodes.map((n) => [n.textContent, (n as HTMLElement).style.transform.match(/-?[\d.]+/g)!.map(Number)])),
+  );
+
+function expectSameView(after: Record<string, number[]>, before: Record<string, number[]>, what: string) {
+  expect(Object.keys(after).sort(), what).toEqual(Object.keys(before).sort());
+  for (const [name, [x, y]] of Object.entries(before)) {
+    expect(Math.abs(after[name][0] - x), `${name} moved sideways ${what}`).toBeLessThanOrEqual(2);
+    expect(Math.abs(after[name][1] - y), `${name} moved up or down ${what}`).toBeLessThanOrEqual(2);
+  }
+}
+
+test('closing a panel goes back to the same view of the whole sky', async ({ page }) => {
+  await installMockIpc(page, withUniverse());
+
+  for (const [width, height] of [[640, 900], [500, 900], [1200, 800]]) {
+    await page.setViewportSize({ width, height });
+    await openUniverse(page);
+    await expect(page.locator('canvas')).toBeVisible();
+    await settled(page);
+    await settled(page);
+    const before = await topLabels(page);
+    expect(Object.keys(before).length).toBeGreaterThan(0);
+
+    await page.getByRole('button', { name: 'Show list' }).click();
+    await page.getByRole('button', { name: /Moth Season/ }).click();
+    await page.getByRole('button', { name: 'Show 3D view' }).click();
+    await settled(page);
+    // In flight, as most people see it, because a resize during a flight does not correct it.
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await page.keyboard.press('Escape');
+    await expect(panel(page)).toHaveCount(0);
+    await expect(async () => expectSameView(await topLabels(page), before, `after closing at ${width}x${height}`)).toPass({ timeout: 15_000 });
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+
+    // The same when the sky was out of sight as the panel closed.
+    await page.getByRole('button', { name: 'Show list' }).click();
+    await page.getByRole('button', { name: /Moth Season/ }).click();
+    await page.getByRole('button', { name: 'Show 3D view' }).click();
+    await settled(page);
+    await page.getByRole('button', { name: 'Show list' }).click();
+    await page.keyboard.press('Escape');
+    await expect(panel(page)).toHaveCount(0);
+    await settled(page);
+    await page.getByRole('button', { name: 'Show 3D view' }).click();
+    await settled(page);
+    await settled(page);
+    expectSameView(await topLabels(page), before, `after closing in the list at ${width}x${height}`);
+  }
+});
+
+test('a view of the whole sky fits again when the window changes after a panel closes', async ({ page }) => {
+  await installMockIpc(page, withUniverse());
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await openUniverse(page);
+  await expect(page.locator('canvas')).toBeVisible();
+  await page.getByRole('button', { name: 'Show list' }).click();
+  await page.getByRole('button', { name: /Moth Season/ }).click();
+  await page.getByRole('button', { name: 'Show 3D view' }).click();
+  await settled(page);
+  await page.keyboard.press('Escape');
+  await expect(panel(page)).toHaveCount(0);
+  await settled(page);
+
+  await page.setViewportSize({ width: 500, height: 900 });
+  await settled(page);
+  await settled(page);
+  const after = await topLabels(page);
+  // A sky nobody has moved, opened fresh in this window.
+  await page.reload();
+  await page.getByRole('button', { name: 'Universe' }).click();
+  await expect(page.locator('canvas')).toBeVisible();
+  await settled(page);
+  await settled(page);
+  expectSameView(after, await topLabels(page), 'against a fresh sky in the new window');
 });
 
 test('the canvas says a list view is available', async ({ page }) => {

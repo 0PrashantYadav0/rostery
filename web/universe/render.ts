@@ -396,8 +396,10 @@ export function mountUniverse(container: HTMLElement, first: Universe): Universe
   let height = 0;
   const middle = new Vector3();
   let radius = 1;
-  // Once someone has touched the view, it stops turning by itself, and a resize no longer reframes it.
+  // Once someone has touched the view, it stops turning by itself.
   let touched = false;
+  // While the view is of the whole sky, with nobody having moved it since, a resize keeps it fitted.
+  let framed = true;
 
   const calm = matchMedia('(prefers-reduced-motion: reduce)');
   /** Only draws when something changes, so a still Universe costs no battery. */
@@ -486,6 +488,9 @@ export function mountUniverse(container: HTMLElement, first: Universe): Universe
   }
 
   function frameAll() {
+    // The layout may have changed this frame, and the observer that says so comes too late for this flight.
+    fit();
+    framed = true;
     controls.minDistance = 0.5;
     flyToward(middle, homeDistance());
   }
@@ -555,6 +560,7 @@ export function mountUniverse(container: HTMLElement, first: Universe): Universe
 
   const stopTurning = () => {
     touched = true;
+    framed = false;
     flight = undefined;
   };
   controls.addEventListener('start', stopTurning);
@@ -605,8 +611,8 @@ export function mountUniverse(container: HTMLElement, first: Universe): Universe
 
   const resize = new ResizeObserver(() => {
     fit();
-    // Until someone moves it, the view fits the window it is in. That includes coming back from hidden.
-    if (!touched && !flight) jumpHome();
+    // A view of everything fits the window it is in. That includes coming back from hidden.
+    if (framed && !flight) jumpHome();
     // Now, in the same frame as the layout change, so the sky never shows blank.
     draw();
     wake();
@@ -667,6 +673,7 @@ export function mountUniverse(container: HTMLElement, first: Universe): Universe
       const planet = universe.planets[id];
       if (!planet) return;
       touched = true;
+      framed = false;
       controls.minDistance = planet.radius * 1.5;
       // A ring needs a little more room than a bare Planet does.
       flyToward(new Vector3(...planet.position), distanceFor(planet.radius) * (planet.source === 'youtube' ? 2.5 : 2.1));
