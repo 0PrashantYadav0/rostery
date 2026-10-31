@@ -123,7 +123,7 @@ Clearing demo data removes demo Plays, demo Interests and demo Affinities in one
 
 **Galaxies.** Deterministic weighted label propagation, with Planets visited heaviest first and ties going to the lowest label, for at most 20 rounds. Galaxy names default to the most common Interest no heavier Galaxy has, or else the heaviest member, so no two default names repeat, and a Roast can replace them.
 
-**Way back to the Source.** A Planet and its top Items carry a URL on the Source. Each is rebuilt from an ID checked for shape, because the text came from an untrusted file, so it can only be an `https` URL on `open.spotify.com` or `www.youtube.com`. A Spotify Export names no artist ID, so without one a Spotify Planet opens a search for its name. A YouTube Planet with no channel has no URL.
+**Way back to the Source.** A Planet and its top Items carry a URL on the Source. Each is rebuilt from an ID checked for shape, because the text came from an untrusted file, so it can only be an `https` URL on `open.spotify.com` or `www.youtube.com`. A Spotify Export names no artist ID, so without one a Spotify Planet opens a search for its name. A YouTube Planet with no channel has no URL. In the app these open in the system browser, through a capability scoped to those two hosts, and the app's window will not navigate anywhere but its own pages. On a Share Site they are plain links.
 
 **Layout.** Computed in Rust so the app and site show the same picture and the result is testable. Galaxy centres go on a Fibonacci sphere. A seeded force simulation runs for 300 steps, then a final pass pushes apart any overlapping Planets. The same input always gives identical output.
 

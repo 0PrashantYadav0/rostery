@@ -2,6 +2,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebview, type DragDropEvent } from '@tauri-apps/api/webview';
 import { open } from '@tauri-apps/plugin-dialog';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import type { ImportSummary, Totals, Universe, UniverseFilter } from './types';
 
 export const totals = () => invoke<Totals>('totals');
@@ -10,6 +11,9 @@ export const clearDemo = () => invoke<Totals>('clear_demo');
 export const hasDemoData = () => invoke<boolean>('has_demo_data');
 export const importPaths = (paths: string[]) => invoke<ImportSummary>('import_paths', { paths });
 export const getUniverse = (filter: UniverseFilter) => invoke<Universe>('get_universe', { filter });
+
+/** Opens a link back to a Source in the system browser. The capability only allows those two hosts. */
+export const openSourceLink = (url: string) => openUrl(url);
 
 /** The Rust side sends its message as a string. Anything else is a real Error. */
 export const errorMessage = (e: unknown) => (e instanceof Error ? e.message : String(e));
