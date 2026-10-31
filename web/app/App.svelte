@@ -30,7 +30,9 @@
     <ul>
       {#each rail as { label, ready }}
         <li class:last={label === 'Settings'}>
+          <!-- A WebKit webview skips a button on Tab unless it has a tabindex. -->
           <button
+            tabindex="0"
             disabled={!ready}
             aria-current={label === screen ? 'page' : undefined}
             title={ready ? undefined : 'Not available yet'}
@@ -52,9 +54,7 @@
       onmissederror={(message) => (missedError = message)}
     />
     {#if screen === 'Universe'}
-      {#key stored}
-        <Universe {importing} {missedError} />
-      {/key}
+      <Universe {importing} {missedError} {stored} />
     {/if}
   </main>
 </div>

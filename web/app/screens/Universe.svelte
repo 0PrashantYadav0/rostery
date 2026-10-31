@@ -1,107 +1,77 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { errorMessage, getUniverse } from '../../shared/api';
-  import { describeUniverse } from '../../shared/summary';
-  import type { Planet, Universe } from '../../shared/types';
-  import type { UniverseHandle } from '../../universe/render';
+  import { errorMessage, getUniverse, openSourceLink } from '../../shared/api';
+  import type { Universe, UniverseFilter } from '../../shared/types';
+  import UniverseView from '../../universe/UniverseView.svelte';
 
-  let { importing, missedError }: { importing: boolean; missedError: string } = $props();
+  let { importing, missedError, stored }: { importing: boolean; missedError: string; stored: number } = $props();
 
-  let host = $state<HTMLElement>();
-  let universe = $state.raw<Universe>();
-  let picked = $state.raw<Planet>();
+  const FILTERS: UniverseFilter[] = ['both', 'spotify', 'youtube'];
+
+  let universes = $state.raw<Partial<Record<UniverseFilter, Universe>>>();
   let error = $state('');
 
-  onMount(() => {
-    let handle: UniverseHandle | undefined;
-    let gone = false;
-    (async () => {
-      const u = await getUniverse('both');
-      universe = u;
-      if (!u.planets.length) return;
-      // A dynamic import, so three.js only loads for someone who opens this screen.
-      const { mountUniverse, NoWebGL } = await import('../../universe/render');
-      if (gone) return;
-      try {
-        handle = mountUniverse(host!, u);
-      } catch (e) {
-        console.error(e);
-        error =
-          e instanceof NoWebGL
-            ? 'This computer could not start 3D drawing, so Rostery cannot show the Universe here. Update your graphics driver or restart this computer, then open this screen again.'
-            : 'Rostery could not draw your Universe. Close Rostery, open it again, then come back to this screen.';
-        return;
-      }
-      handle.onSelect((id) => (picked = u.planets.find((p) => p.id === id)));
-      handle.onContextChange((lost) => {
-        error = lost
-          ? 'Rostery lost its 3D drawing, which can happen when a graphics driver restarts. If the picture does not come back by itself, open another screen and come back to this one.'
-          : '';
+  // Runs when this screen opens and again each time Sources finishes changing what is stored. The last
+  // answer wins, so a slow one from before an import cannot replace the one from after it.
+  let latest = 0;
+  $effect(() => {
+    stored;
+    const asked = (latest += 1);
+    Promise.all(FILTERS.map(getUniverse))
+      .then((answers) => {
+        if (asked !== latest) return;
+        universes = Object.fromEntries(FILTERS.map((filter, i) => [filter, answers[i]]));
+        error = '';
+      })
+      .catch((e) => {
+        if (asked === latest) error = errorMessage(e);
       });
-    })().catch((e) => (error = errorMessage(e)));
-    return () => {
-      gone = true;
-      handle?.destroy();
-    };
   });
 
+  const hasPlanets = $derived(Object.values(universes ?? {}).some((u) => u.planets.length));
   const status = $derived.by(() => {
-    if (picked) return `${picked.name}, in the ${universe!.galaxies[picked.galaxy].name} Galaxy`;
     if (importing) return 'Reading your history. The Universe will update when that finishes.';
-    if (!universe?.planets.length) return 'Nothing to draw yet. Add your history on the Sources screen, or try the demo data there.';
-    return 'Drag to turn. Scroll to zoom. Click a Planet to see its name.';
+    if (universes && !hasPlanets) return 'Nothing to draw yet. Add your history on the Sources screen, or try the demo data there.';
+    return '';
   });
+
+  function openLink(url: string) {
+    error = '';
+    openSourceLink(url).catch((e) => (error = errorMessage(e)));
+  }
 </script>
 
-<div class="screen">
-  <div class="sky" bind:this={host}></div>
-  <header>
-    <h1>Universe</h1>
-    {#if universe?.planets.length}
-      <p>{describeUniverse(universe)}</p>
-    {/if}
-    {#if missedError}
-      <p role="alert">{missedError}</p>
-    {/if}
-  </header>
+{#snippet heading()}
+  <h1>Universe</h1>
+  <p class="status" role="status">{status}</p>
+  {#if missedError}
+    <p role="alert">{missedError}</p>
+  {/if}
   {#if error}
-    <p class="note" role="alert">{error}</p>
-  {:else if universe}
-    <p class="note" role="status">{status}</p>
+    <p role="alert">{error}</p>
+  {/if}
+{/snippet}
+
+<div class="screen">
+  {#if universes && hasPlanets}
+    <UniverseView {universes} showItems {openLink}>
+      {@render heading()}
+    </UniverseView>
+  {:else}
+    <header>
+      {@render heading()}
+    </header>
   {/if}
 </div>
 
 <style>
   .screen {
-    position: relative;
     height: 100%;
     overflow: hidden;
   }
 
-  .sky {
-    position: absolute;
-    inset: 0;
-  }
-
-  /*
-   * Words sit over the picture, so they must not catch the drag that turns it. A Planet can pass behind them in
-   * any colour, so they have a solid backing. The left and top offsets line the words up with the other screens.
-   */
-  header,
-  .note {
-    position: absolute;
-    left: 33px;
-    max-width: calc(100% - 66px);
-    padding: 10px 14px;
-    border: 1px solid var(--rule);
-    border-radius: 6px;
-    background: var(--panel);
-    overflow-wrap: anywhere;
-    pointer-events: none;
-  }
-
   header {
-    top: 25px;
+    padding: 35px 47px;
+    overflow-wrap: anywhere;
   }
 
   h1 {
@@ -109,22 +79,15 @@
     font: 500 38px/1.1 var(--serif);
   }
 
-  header p {
+  p {
     margin: 8px 0 0;
     color: var(--dim);
-    font-variant-numeric: tabular-nums;
+    /* A name or a path can come from a file, so these keep their box. */
+    overflow-wrap: anywhere;
   }
 
-  .note {
-    bottom: 13px;
+  .status:empty {
     margin: 0;
-    color: var(--dim);
-    /* A name comes from a file and can be any length, so this keeps it to 4 lines. */
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 4;
-    line-clamp: 4;
-    overflow: hidden;
   }
 
   [role='alert'] {
@@ -132,13 +95,11 @@
   }
 
   @media (max-width: 720px) {
-    header,
-    .note {
-      left: 9px;
-      max-width: calc(100% - 18px);
-    }
     header {
-      top: 9px;
+      padding: 18px;
+    }
+    h1 {
+      font-size: 26px;
     }
   }
 </style>

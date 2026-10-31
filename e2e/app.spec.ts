@@ -2,7 +2,8 @@ import { readFileSync } from 'node:fs';
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import { Color } from 'three';
 import { emitEvent, installMockIpc } from './mock-ipc';
-import type { ImportSummary, Planet, SourceTotals, Totals, Universe } from '../web/shared/types';
+import { galaxyColor } from '../web/universe/scene-data';
+import type { ImportSummary, Planet, Source, SourceTotals, Totals, Universe, UniverseFilter } from '../web/shared/types';
 
 const none: SourceTotals = { plays: 0, minutes: 0, creators: 0, firstPlay: null, lastPlay: null };
 
@@ -544,20 +545,34 @@ function universe(): Universe {
 const noUniverse: Universe = { filter: 'both', planets: [], links: [], galaxies: [] };
 const withUniverse = (u: Universe = universe()) => ({ ...empty, get_universe: () => u });
 
+/** Only one Source's Planets from `from`, numbered again, the way Rust answers for that filter. */
+function only(source: Source, from = universe()): Universe {
+  const planets = from.planets.filter((p) => p.source === source).map((p, id) => ({ ...p, id }));
+  return { ...from, filter: source, planets, links: [] };
+}
+
+/** Answers each filter the way Rust does. Any filter left out has nothing in it. */
+const withUniverses = (universes: Partial<Record<UniverseFilter, Universe>>) => ({
+  ...empty,
+  get_universe: ({ filter }: { filter: UniverseFilter }) => universes[filter] ?? noUniverse,
+});
+
 async function openUniverse(page: Page) {
   await page.goto('/');
   await page.getByRole('button', { name: 'Universe' }).click();
 }
 
-/**
- * What the canvas drew: how many colours, and the colour at each point. The canvas has alpha, so a screenshot
- * also holds the page behind it and the words over it, and those alone have hundreds of colours. So this hides
- * them first. The page decodes the PNG, so no library is needed.
- */
-async function readCanvas(page: Page, canvas: Locator, points: { x: number; y: number }[] = []) {
-  const hide = await page.addStyleTag({ content: 'main { background: none !important; } header, .note { visibility: hidden; }' });
+/** The canvas's own pixels, with the words over it hidden, decoded in the page so no library is needed. */
+async function canvasPng(page: Page, canvas: Locator) {
+  const hide = await page.addStyleTag({ content: '.bar, .legend, .labels { visibility: hidden; }' });
   const png = (await canvas.screenshot()).toString('base64');
   await hide.evaluate((style) => (style as Element).remove());
+  return png;
+}
+
+/** What the canvas drew: how many colours, and the average colour round each point. */
+async function readCanvas(page: Page, canvas: Locator, points: { x: number; y: number }[] = []) {
+  const png = await canvasPng(page, canvas);
   return page.evaluate(
     async ({ png, points }) => {
       const image = new Image();
@@ -572,8 +587,14 @@ async function readCanvas(page: Page, canvas: Locator, points: { x: number; y: n
       const colors = new Set<number>();
       for (let i = 0; i < data.length; i += 4) colors.add((data[i] << 16) | (data[i + 1] << 8) | data[i + 2]);
       const at = ({ x, y }: { x: number; y: number }) => {
-        const i = (Math.round(y) * image.width + Math.round(x)) * 4;
-        return [data[i], data[i + 1], data[i + 2]] as [number, number, number];
+        const sum = [0, 0, 0];
+        for (let dy = -3; dy <= 3; dy += 1) {
+          for (let dx = -3; dx <= 3; dx += 1) {
+            const i = (Math.round(y + dy) * image.width + Math.round(x + dx)) * 4;
+            for (let c = 0; c < 3; c += 1) sum[c] += data[i + c];
+          }
+        }
+        return sum.map((v) => v / 49) as [number, number, number];
       };
       return { colors: colors.size, at: points.map(at) };
     },
@@ -581,11 +602,42 @@ async function readCanvas(page: Page, canvas: Locator, points: { x: number; y: n
   );
 }
 
-const hueOf = ([r, g, b]: [number, number, number]) => new Color(r / 255, g / 255, b / 255).getHSL({ h: 0, s: 0, l: 0 }).h;
-const brightness = ([r, g, b]: [number, number, number]) => Math.max(r, g, b);
+/** How far apart two screenshots of a canvas are in a square in the middle, as an average out of 255. */
+function differenceInMiddle(page: Page, a: string, b: string, share = 0.3) {
+  return page.evaluate(
+    async ({ a, b, share }) => {
+      const read = async (png: string) => {
+        const image = new Image();
+        image.src = `data:image/png;base64,${png}`;
+        await image.decode();
+        const canvas = document.createElement('canvas');
+        canvas.width = image.width;
+        canvas.height = image.height;
+        const context = canvas.getContext('2d', { willReadFrequently: true })!;
+        context.drawImage(image, 0, 0);
+        const side = Math.round(image.height * share);
+        return context.getImageData((image.width - side) / 2, (image.height - side) / 2, side, side).data;
+      };
+      const [left, right] = [await read(a), await read(b)];
+      let sum = 0;
+      for (let i = 0; i < left.length; i += 1) sum += Math.abs(left[i] - right[i]);
+      return sum / left.length;
+    },
+    { a, b, share },
+  );
+}
+
+/** Two frames, so anything a click or a tab asked for is on the canvas. */
+const settled = (page: Page) =>
+  page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+
+const hueOf = ([r, g, b]: number[]) => new Color(r / 255, g / 255, b / 255).getHSL({ h: 0, s: 0, l: 0 }).h;
+const hueGap = (a: number, b: number) => Math.min(Math.abs(a - b), 1 - Math.abs(a - b));
+const brightness = ([r, g, b]: number[]) => Math.max(r, g, b);
+const pigment = (hue: number) => hueOf(galaxyColor(hue).map((c) => c * 255));
 
 test('universe draws something', async ({ page }) => {
-  const asked: unknown[] = [];
+  const asked: { filter: UniverseFilter }[] = [];
   await installMockIpc(page, {
     ...empty,
     get_universe: (args) => {
@@ -603,12 +655,12 @@ test('universe draws something', async ({ page }) => {
   await expect(page.getByRole('button', { name: 'Universe' })).toHaveAttribute('aria-current', 'page');
   await expect(page.getByRole('button', { name: 'Sources' })).not.toHaveAttribute('aria-current', 'page');
   await expect(page.getByRole('heading', { name: 'Add your history' })).toBeHidden();
-  await expect.poll(async () => (await readCanvas(page, canvas)).colors, { timeout: 15_000 }).toBeGreaterThan(50);
-  expect(asked).toEqual([{ filter: 'both' }]);
+  await expect.poll(async () => (await readCanvas(page, canvas)).colors, { timeout: 40_000 }).toBeGreaterThan(50);
+  expect(asked.map((a) => a.filter).sort()).toEqual(['both', 'spotify', 'youtube']);
 });
 
 /** Two Planets in their own Galaxies, side by side, with a Link through the middle of the view. */
-function twoPlanets(): Universe {
+function twoPlanets(strength: number | null = 0.6): Universe {
   const [a, b] = universe().planets;
   return {
     filter: 'both',
@@ -616,7 +668,7 @@ function twoPlanets(): Universe {
       { ...a, radius: 3, position: [-12, 0, 0], galaxy: 0 },
       { ...b, radius: 3, position: [12, 0, 0], galaxy: 1 },
     ],
-    links: [{ a: 0, b: 1, strength: 0.6, shared: [] }],
+    links: strength === null ? [] : [{ a: 0, b: 1, strength, shared: [] }],
     galaxies: [
       { id: 0, name: 'dreamy', hue: 0.11, size: 1 },
       { id: 1, name: 'tinkering', hue: 0.73, size: 1 },
@@ -624,35 +676,90 @@ function twoPlanets(): Universe {
   };
 }
 
-/** Fails unless each of twoPlanets() shows in its own Galaxy's colour, with their Link between them on a dark sky. */
+/** Fails unless each of twoPlanets() shows in its own Galaxy's colour on a dark sky. */
 async function expectTwoPlanetsDrawn(page: Page) {
   const canvas = page.locator('canvas');
   await expect(canvas).toBeVisible();
   const box = (await canvas.boundingBox())!;
   const [x, y] = [box.width / 2, box.height / 2];
   // Rust fits the sky to the canvas's height, which puts each Planet this far from the middle.
-  const across = box.height * 0.37;
-  // The Link is one pixel tall, so look just above and below where it should be too.
-  const onLink = [-2, -1, 0, 1, 2].map((d) => ({ x, y: y + d }));
+  const across = box.height * 0.39;
   await expect(async () => {
-    const { at } = await readCanvas(page, canvas, [{ x: x - across, y }, { x: x + across, y }, { x: 8, y: 8 }, ...onLink]);
-    const [left, right, corner, ...link] = at;
-    // Not exact, because the light on a Planet is a little warm.
-    expect(Math.abs(hueOf(left) - 0.11), `left Planet is ${left}`).toBeLessThan(0.06);
-    expect(Math.abs(hueOf(right) - 0.73), `right Planet is ${right}`).toBeLessThan(0.06);
-    expect(brightness(left), `left Planet is ${left}`).toBeGreaterThan(100);
-    expect(brightness(right), `right Planet is ${right}`).toBeGreaterThan(100);
-    expect(brightness(corner), `the corner is ${corner}`).toBeLessThan(40);
-    expect(Math.max(...link.map(brightness)), `the Link is ${link}`).toBeGreaterThan(40);
-  }).toPass({ timeout: 15_000 });
+    const { at } = await readCanvas(page, canvas, [{ x: x - across, y }, { x: x + across, y }, { x: 8, y: 8 }]);
+    const [left, right, corner] = at;
+    // Not exact, because bands, craters and light all shift a colour a little.
+    expect(hueGap(hueOf(left), pigment(0.11)), `left Planet is ${left}`).toBeLessThan(0.07);
+    expect(hueGap(hueOf(right), pigment(0.73)), `right Planet is ${right}`).toBeLessThan(0.07);
+    expect(brightness(left), `left Planet is ${left}`).toBeGreaterThan(80);
+    expect(brightness(right), `right Planet is ${right}`).toBeGreaterThan(80);
+    expect(brightness(corner), `the corner is ${corner}`).toBeLessThan(60);
+    // Software WebGL can spend many seconds compiling the shaders on a busy machine.
+  }).toPass({ timeout: 40_000 });
 }
 
-test('Planets draw in their Galaxy colours with their Link between them', async ({ page }) => {
+test('Planets draw in their Galaxy colours', async ({ page }) => {
   await installMockIpc(page, withUniverse(twoPlanets()));
 
   await openUniverse(page);
 
   await expectTwoPlanetsDrawn(page);
+});
+
+test('a Link shows, and a stronger one shows more', async ({ page }) => {
+  // The tabs here are only a way to see the same two Planets with each Link.
+  await installMockIpc(
+    page,
+    withUniverses({ spotify: twoPlanets(null), youtube: twoPlanets(0.15), both: twoPlanets(0.9) }),
+  );
+  await openUniverse(page);
+  const canvas = page.locator('canvas');
+  await expect(canvas).toBeVisible();
+  const look = async (tab: string) => {
+    await page.getByRole('group', { name: 'Which Source to show' }).getByRole('button', { name: tab }).click();
+    await settled(page);
+    return canvasPng(page, canvas);
+  };
+  const strong = await look('Both');
+  const none = await look('Spotify');
+  const weak = await look('YouTube');
+
+  // The whole picture, since the arc is thin and a Planet at each end of it is the same either way.
+  const [toWeak, toStrong] = [await differenceInMiddle(page, none, weak, 1), await differenceInMiddle(page, none, strong, 1)];
+  expect(toWeak).toBeGreaterThan(0);
+  expect(toStrong).toBeGreaterThan(toWeak * 2);
+});
+
+test('Spotify and YouTube Planets look different, and no two look identical', async ({ page }) => {
+  const named = (name: string, source: Source): Universe => {
+    const [a] = universe().planets;
+    return {
+      filter: source,
+      planets: [{ ...a, name, source, radius: 4, position: [0, 0, 0], galaxy: 0 }],
+      links: [],
+      galaxies: [{ id: 0, name: 'dreamy', hue: 0.11, size: 1 }],
+    };
+  };
+  // Same place, size and Galaxy each time, so only what makes the Planet itself can differ.
+  await installMockIpc(
+    page,
+    withUniverses({ spotify: named('Moth Season', 'spotify'), youtube: named('Moth Season', 'youtube'), both: named('Velvet Anchor', 'spotify') }),
+  );
+  await openUniverse(page);
+  const canvas = page.locator('canvas');
+  await expect(canvas).toBeVisible();
+  const look = async (tab: string) => {
+    await page.getByRole('group', { name: 'Which Source to show' }).getByRole('button', { name: tab }).click();
+    await settled(page);
+    return canvasPng(page, canvas);
+  };
+  const artist = await look('Spotify');
+  const channel = await look('YouTube');
+  const otherArtist = await look('Both');
+  const again = await look('Spotify');
+
+  expect(await differenceInMiddle(page, artist, again)).toBeLessThan(1);
+  expect(await differenceInMiddle(page, artist, channel)).toBeGreaterThan(8);
+  expect(await differenceInMiddle(page, artist, otherArtist)).toBeGreaterThan(4);
 });
 
 test('three.js loads only on the Universe screen', async ({ page }) => {
@@ -704,21 +811,63 @@ function onePlanet(): Universe {
   };
 }
 
-test('clicking a Planet names it', async ({ page }) => {
+/** Moth Season and friends, with everything a panel can show. */
+function detailed(): Universe {
+  const sky = universe();
+  sky.planets[0] = {
+    ...sky.planets[0],
+    interests: ['dream pop', 'shoegaze'],
+    url: 'https://open.spotify.com/artist/abc',
+    topItems: [
+      { title: 'Low Tide', url: 'https://open.spotify.com/track/def', plays: 9 },
+      { title: 'Paper Signal', url: null, plays: 4 },
+    ],
+  };
+  return sky;
+}
+
+async function clickMiddleOfSky(page: Page) {
+  const box = (await page.locator('canvas').boundingBox())!;
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+}
+
+const panel = (page: Page) => page.getByRole('complementary');
+
+test('clicking a Planet opens its panel, and clicking empty sky does not', async ({ page }) => {
   await page.setViewportSize({ width: 1000, height: 700 });
   await installMockIpc(page, withUniverse(onePlanet()));
 
   await openUniverse(page);
   const canvas = page.locator('canvas');
   await expect(canvas).toBeVisible();
-  const status = page.getByRole('status');
-  await expect(status).toContainText('Click a Planet');
+  await settled(page);
 
   const box = (await canvas.boundingBox())!;
   await page.mouse.click(box.x + 8, box.y + 8);
-  await expect(status).toContainText('Click a Planet');
-  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-  await expect(status).toHaveText('Moth Season, in the dreamy Galaxy');
+  await expect(panel(page)).toHaveCount(0);
+  await clickMiddleOfSky(page);
+  await expect(panel(page).getByRole('heading', { name: 'Moth Season' })).toBeVisible();
+  await expect(panel(page)).toContainText('7 hours on Spotify');
+  await expect(panel(page)).toContainText('dreamy Galaxy');
+});
+
+test('hovering a Planet shows a tooltip, and leaving it takes it away', async ({ page }) => {
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await installMockIpc(page, withUniverse(onePlanet()));
+  await openUniverse(page);
+  const canvas = page.locator('canvas');
+  await expect(canvas).toBeVisible();
+  await settled(page);
+  const box = (await canvas.boundingBox())!;
+  const tooltip = page.locator('.label.tooltip');
+
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await expect(tooltip).toBeVisible();
+  await expect(tooltip).toContainText('Moth Season');
+  await expect(tooltip).toContainText('7 hours, dreamy Galaxy');
+
+  await page.mouse.move(box.x + 8, box.y + 8);
+  await expect(tooltip).toBeHidden();
 });
 
 test('dragging turns the Universe and does not pick a Planet', async ({ page }) => {
@@ -727,9 +876,10 @@ test('dragging turns the Universe and does not pick a Planet', async ({ page }) 
   await openUniverse(page);
   const canvas = page.locator('canvas');
   await expect(canvas).toBeVisible();
+  await settled(page);
   const box = (await canvas.boundingBox())!;
   const middle = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
-  const before = await canvas.screenshot();
+  const before = await canvasPng(page, canvas);
 
   // It ends on the Planet, where a click would pick it. The stars show the turn.
   await page.mouse.move(middle.x + 150, middle.y + 40);
@@ -737,38 +887,42 @@ test('dragging turns the Universe and does not pick a Planet', async ({ page }) 
   await page.mouse.move(middle.x, middle.y, { steps: 5 });
   await page.mouse.up();
 
-  await expect.poll(async () => (await canvas.screenshot()).equals(before)).toBe(false);
-  await expect(page.getByRole('status')).toContainText('Click a Planet');
+  await expect.poll(async () => (await canvasPng(page, canvas)) === before).toBe(false);
+  await expect(panel(page)).toHaveCount(0);
 });
 
 test('a hostile Planet name is only text, and it cannot take over the screen', async ({ page }) => {
   await page.setViewportSize({ width: 1000, height: 700 });
   const hostile = onePlanet();
   hostile.planets[0].name = `</script><img src=x onerror="window.ran = 1">${'long '.repeat(2000)}`;
+  hostile.galaxies[0].name = hostile.planets[0].name;
   await installMockIpc(page, withUniverse(hostile));
 
   await openUniverse(page);
   const canvas = page.locator('canvas');
   await expect(canvas).toBeVisible();
-  const box = (await canvas.boundingBox())!;
-  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await settled(page);
+  await clickMiddleOfSky(page);
 
-  const status = page.getByRole('status');
-  await expect(status).toContainText('</script><img src=x');
+  const heading = panel(page).getByRole('heading', { level: 2 });
+  await expect(heading).toContainText('</script><img src=x');
   await expect(page.locator('main img')).toHaveCount(0);
   expect(await page.evaluate(() => (window as any).ran)).toBeUndefined();
-  expect((await status.boundingBox())!.height).toBeLessThan(box.height / 4);
+  expect((await heading.boundingBox())!.height).toBeLessThan(200);
   const sideways = await page.evaluate(() => document.querySelector('main')!.scrollWidth - document.querySelector('main')!.clientWidth);
   expect(sideways).toBeLessThanOrEqual(0);
 });
 
-test('an empty Universe says what to do', async ({ page }) => {
+test('empty universe shows guidance', async ({ page }) => {
   await installMockIpc(page, withUniverse(noUniverse));
 
   await openUniverse(page);
 
   await expect(page.getByText('Nothing to draw yet.')).toBeVisible();
+  await expect(page.getByText('Add your history on the Sources screen, or try the demo data there.')).toBeVisible();
   await expect(page.locator('canvas')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Show list' })).toHaveCount(0);
+  await expect(page.getByRole('group', { name: 'Which Source to show' })).toHaveCount(0);
 });
 
 test('a Universe that cannot load shows why', async ({ page }) => {
@@ -784,20 +938,32 @@ test('a Universe that cannot load shows why', async ({ page }) => {
   await expect(page.getByRole('alert')).toContainText('could not use its local database');
 });
 
-test('with no WebGL the screen says what to do and the Planet count still shows', async ({ page }) => {
-  await page.addInitScript(() => {
+/** Makes every request for a WebGL context fail, the way a computer with no graphics driver does. */
+const noWebGL = (page: Page) =>
+  page.addInitScript(() => {
     const real = HTMLCanvasElement.prototype.getContext as any;
     HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement, kind: string, ...rest: unknown[]) {
-      return kind.startsWith('webgl') ? null : real.call(this, kind, ...rest);
+      return kind === 'webgl2' || kind === 'webgl' ? null : real.call(this, kind, ...rest);
     } as any;
   });
-  await installMockIpc(page, withUniverse());
+
+test('falls back to list without webgl', async ({ page }) => {
+  await noWebGL(page);
+  await installMockIpc(page, withUniverse(detailed()));
 
   await openUniverse(page);
 
   await expect(page.getByRole('alert')).toContainText('could not start 3D drawing');
-  await expect(page.getByRole('alert')).toContainText('Update your graphics driver or restart this computer');
+  await expect(page.getByRole('alert')).toContainText('here is the list of Planets');
   await expect(page.getByText('6 Planets, 5 Links, 2 Galaxies')).toBeVisible();
+  await expect(page.getByRole('list', { name: 'Planets, largest first' }).getByRole('listitem')).toHaveCount(6);
+  await expect(page.locator('canvas')).toHaveCount(0);
+  // There is nothing to go back to, so no button offers it.
+  await expect(page.getByRole('button', { name: 'Show 3D view' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Show list' })).toHaveCount(0);
+
+  await page.getByRole('button', { name: /Moth Season/ }).click();
+  await expect(panel(page).getByRole('heading', { name: 'Moth Season' })).toBeVisible();
 });
 
 test('a failure while drawing is not blamed on the computer', async ({ page }) => {
@@ -807,9 +973,26 @@ test('a failure while drawing is not blamed on the computer', async ({ page }) =
 
   await openUniverse(page);
 
-  await expect(page.getByRole('alert')).toContainText('Rostery could not draw your Universe');
-  await expect(page.getByRole('alert')).toContainText('Close Rostery');
+  await expect(page.getByRole('alert')).toContainText('could not draw this Universe');
   await expect(page.getByRole('alert')).not.toContainText('3D drawing');
+  // Its drawing context goes too, since a browser only allows so many.
+  await expect(page.locator('canvas')).toHaveCount(0);
+  // A Link to nothing still leaves the rest usable.
+  await page.getByRole('button', { name: /Moth Season/ }).click();
+  await expect(panel(page).getByRole('heading', { name: 'Moth Season' })).toBeVisible();
+});
+
+test('a renderer that cannot load shows the list and a plain message', async ({ page }) => {
+  await page.route(/render-[^/]*\.js$/, (route) => route.abort());
+  await installMockIpc(page, withUniverse());
+
+  await openUniverse(page);
+
+  const alert = page.getByRole('alert');
+  await expect(alert).toContainText('The 3D view could not load, so here is the list of Planets');
+  await expect(alert).not.toContainText(/import|fetch|module|load failed/i);
+  await expect(page.getByRole('list', { name: 'Planets, largest first' }).getByRole('listitem')).toHaveCount(6);
+  await expect(page.getByRole('button', { name: 'Show 3D view' })).toHaveCount(0);
 });
 
 test('when the drawing context is lost the screen says so, and it draws again when it comes back', async ({ page }) => {
@@ -823,11 +1006,14 @@ test('when the drawing context is lost the screen says so, and it draws again wh
   await lose.evaluate((extension) => extension.loseContext());
   // If it never comes back, this is what stays on screen.
   await expect(page.getByRole('alert')).toContainText('lost its 3D drawing');
-  await expect(page.getByRole('alert')).toContainText('open another screen and come back');
+  await expect(page.getByRole('alert')).toContainText('use the list, or leave this page and come back');
+  // The list still works while the picture is gone.
+  await page.getByRole('button', { name: 'Show list' }).click();
+  await expect(page.getByRole('list', { name: 'Planets, largest first' })).toBeVisible();
+  await page.getByRole('button', { name: 'Show 3D view' }).click();
 
   await lose.evaluate((extension) => extension.restoreContext());
   await expect(page.getByRole('alert')).toBeHidden();
-  await expect(page.getByRole('status')).toContainText('Click a Planet');
   await expectTwoPlanetsDrawn(page);
 });
 
@@ -844,11 +1030,13 @@ test('the words stay readable with a Planet behind them', async ({ page }) => {
   for (const text of [
     page.getByRole('heading', { name: 'Universe' }),
     page.getByText('1 Planet, 0 Links, 1 Galaxy'),
-    page.getByRole('status'),
+    page.getByRole('button', { name: 'Show list' }),
+    page.getByRole('button', { name: 'Both' }),
+    page.getByText('Galaxies', { exact: true }),
   ]) {
     const { color, backing } = await text.evaluate((node) => ({
       color: getComputedStyle(node).color,
-      backing: getComputedStyle(node.closest('header, .note')!).backgroundColor,
+      backing: getComputedStyle(node.closest('.title, .controls, .legend')!).backgroundColor,
     }));
     // Solid, because anything the picture shows through would change the contrast from one frame to the next.
     expect(backing).toMatch(/^rgb\(/);
@@ -870,6 +1058,7 @@ test('leaving the Universe frees its drawing context and coming back asks for fr
   await page.goto('/');
   for (let visit = 0; visit < 3; visit += 1) {
     await page.getByRole('button', { name: 'Universe' }).click();
+    await expect(page.locator('canvas')).toBeVisible();
     const canvas = await page.locator('canvas').elementHandle();
     await page.getByRole('button', { name: 'Sources' }).click();
     await expect(page.locator('canvas')).toHaveCount(0);
@@ -879,7 +1068,8 @@ test('leaving the Universe frees its drawing context and coming back asks for fr
   }
 
   await expect(page.getByRole('heading', { name: 'Add your history' })).toBeVisible();
-  expect(asked).toBe(3);
+  // One for each of the 3 filters, on each of the 3 visits.
+  expect(asked).toBe(9);
 });
 
 test('an import keeps going while you look at the Universe', async ({ page }) => {
@@ -932,7 +1122,7 @@ test('the Universe says an import is running and draws the result when it ends',
   finish();
   await expect(page.locator('canvas')).toBeVisible();
   await expect(page.getByText('6 Planets, 5 Links, 2 Galaxies')).toBeVisible();
-  await expect(page.getByRole('status')).toContainText('Click a Planet');
+  await expect(page.getByText('Reading your history')).toBeHidden();
 });
 
 test('an import that fails while you look at the Universe says so there', async ({ page }) => {
@@ -961,6 +1151,619 @@ test('an import that fails while you look at the Universe says so there', async 
   await page.getByRole('button', { name: 'Universe' }).click();
   await expect(page.getByText('Nothing to draw yet')).toBeVisible();
   await expect(page.getByRole('alert')).toBeHidden();
+});
+
+test('finishing an import keeps the canvas and the camera, and swaps nothing else out', async ({ page }) => {
+  await page.setViewportSize({ width: 1000, height: 700 });
+  let stored = universe();
+  let finish = () => {};
+  await installMockIpc(page, {
+    ...empty,
+    get_universe: () => stored,
+    'plugin:dialog|open': () => ['/d/my_spotify_data.zip'],
+    import_paths: () =>
+      new Promise((resolve) => {
+        finish = () => {
+          stored = universe();
+          stored.planets.push({ ...stored.planets[5], id: 6, name: 'Late Arrival', radius: 0.6, position: [0, 0, 20] });
+          stored.galaxies[1].size = 4;
+          resolve({ ...nothing, filesRead: 1, added: 5 });
+        };
+      }),
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Choose file' }).click();
+  await expect(page.getByRole('status')).toContainText('Reading your history');
+  await page.getByRole('button', { name: 'Universe' }).click();
+  const canvas = page.locator('canvas');
+  await expect(canvas).toBeVisible();
+  await settled(page);
+
+  // Someone has turned the sky to look at something.
+  const box = (await canvas.boundingBox())!;
+  await page.mouse.move(box.x + 500, box.y + 300);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 420, box.y + 260, { steps: 4 });
+  await page.mouse.up();
+
+  // A sky that has been let go drifts on for a moment, and that is not what this test is about.
+  const label = page.locator('.label', { hasText: 'Moth Season' });
+  const where = () => label.evaluate((node) => (node as HTMLElement).style.transform);
+  await expect(async () => {
+    const start = await where();
+    await page.waitForTimeout(400);
+    expect(await where()).toBe(start);
+  }).toPass();
+  const before = await where();
+  const node = await canvas.elementHandle();
+  await node!.evaluate((c) => ((c as any).marked = true));
+
+  finish();
+  await expect(page.getByText('7 Planets, 5 Links, 2 Galaxies')).toBeVisible();
+
+  await settled(page);
+  expect(await canvas.evaluate((c) => (c as any).marked)).toBe(true);
+  // Rust moved nothing that was already there, so its name should not have moved on screen either.
+  expect(await where()).toBe(before);
+});
+
+test('a sky nobody has touched fits what an import adds', async ({ page }) => {
+  await page.setViewportSize({ width: 1000, height: 700 });
+  let stored = universe();
+  let finish = () => {};
+  await installMockIpc(page, {
+    ...empty,
+    get_universe: () => stored,
+    'plugin:dialog|open': () => ['/d/my_spotify_data.zip'],
+    import_paths: () =>
+      new Promise((resolve) => {
+        finish = () => {
+          stored = universe();
+          stored.planets.unshift({ ...stored.planets[0], id: 0, name: 'Far Favourite', radius: 4, position: [400, 0, 0] });
+          stored.planets.forEach((p, id) => (p.id = id));
+          stored.links = [];
+          resolve({ ...nothing, filesRead: 1, added: 5 });
+        };
+      }),
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Choose file' }).click();
+  await page.getByRole('button', { name: 'Universe' }).click();
+  await expect(page.locator('canvas')).toBeVisible();
+  await settled(page);
+
+  finish();
+  await expect(page.getByText('7 Planets, 0 Links, 2 Galaxies')).toBeVisible();
+  await settled(page);
+  await expect(page.locator('.label', { hasText: 'Far Favourite' })).toBeInViewport();
+});
+
+test('a Planet stays open through an import, under whatever id it has now', async ({ page }) => {
+  await page.setViewportSize({ width: 1000, height: 700 });
+  let stored = detailed();
+  let finish = () => {};
+  await installMockIpc(page, {
+    ...empty,
+    get_universe: () => stored,
+    'plugin:dialog|open': () => ['/d/my_spotify_data.zip'],
+    import_paths: () =>
+      new Promise((resolve) => {
+        finish = () => {
+          // Someone heavier arrives, so everyone's id moves down one.
+          const older = detailed();
+          stored = {
+            ...older,
+            planets: [
+              { ...older.planets[0], id: 0, name: 'New Favourite', interests: [], url: null, topItems: [] },
+              ...older.planets.map((p) => ({ ...p, id: p.id + 1 })),
+            ],
+            links: older.links.map((l) => ({ ...l, a: l.a + 1, b: l.b + 1 })),
+          };
+          resolve({ ...nothing, filesRead: 1, added: 5 });
+        };
+      }),
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Choose file' }).click();
+  await page.getByRole('button', { name: 'Universe' }).click();
+  await expect(page.locator('canvas')).toBeVisible();
+  await page.getByRole('button', { name: 'Show list' }).click();
+  await page.getByRole('button', { name: /Moth Season/ }).click();
+  const heading = panel(page).getByRole('heading', { level: 2 });
+  await expect(heading).toHaveText('Moth Season');
+
+  finish();
+  await expect(page.getByText('7 Planets, 5 Links, 2 Galaxies')).toBeVisible();
+  await expect(heading).toHaveText('Moth Season');
+  await expect(panel(page)).toContainText('dream pop');
+});
+
+test('filter tabs change the planet count', async ({ page }) => {
+  await installMockIpc(page, withUniverses({ both: universe(), spotify: only('spotify'), youtube: only('youtube') }));
+  await openUniverse(page);
+  const canvas = page.locator('canvas');
+  await expect(canvas).toBeVisible();
+  await expect(page.getByText('6 Planets, 5 Links, 2 Galaxies')).toBeVisible();
+  const tabs = page.getByRole('group', { name: 'Which Source to show' });
+  await expect(tabs.getByRole('button', { name: 'Both' })).toHaveAttribute('aria-pressed', 'true');
+
+  await canvas.evaluate((c) => ((c as any).marked = true));
+  await tabs.getByRole('button', { name: 'YouTube' }).click();
+  await expect(page.getByText('3 Planets, 0 Links, 2 Galaxies')).toBeVisible();
+  await expect(tabs.getByRole('button', { name: 'YouTube' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(tabs.getByRole('button', { name: 'Both' })).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('.label', { hasText: 'Tape Hiss TV' })).toBeVisible();
+  await expect(page.locator('.label', { hasText: 'Moth Season' })).toHaveCount(0);
+
+  await tabs.getByRole('button', { name: 'Spotify' }).click();
+  await expect(page.locator('.label', { hasText: 'Moth Season' })).toBeVisible();
+
+  await tabs.getByRole('button', { name: 'Both' }).click();
+  await expect(page.getByText('6 Planets, 5 Links, 2 Galaxies')).toBeVisible();
+  // The same canvas all along, so a change of filter cannot flash an empty one.
+  expect(await canvas.evaluate((c) => (c as any).marked)).toBe(true);
+});
+
+test('a filter change frames the new Planets and a click still picks the right one', async ({ page }) => {
+  await page.setViewportSize({ width: 1000, height: 700 });
+  // Far outside anything the first sky drew, which a stale bounding sphere would miss.
+  const far: Universe = {
+    ...onePlanet(),
+    filter: 'youtube',
+    planets: [{ ...onePlanet().planets[0], name: 'Far Away', source: 'youtube', position: [900, 200, -300] }],
+  };
+  await installMockIpc(page, withUniverses({ both: universe(), spotify: only('spotify'), youtube: far }));
+  await openUniverse(page);
+  await expect(page.locator('canvas')).toBeVisible();
+  await settled(page);
+
+  await page.getByRole('group', { name: 'Which Source to show' }).getByRole('button', { name: 'YouTube' }).click();
+  await settled(page);
+  await expect(page.locator('.label', { hasText: 'Far Away' })).toBeInViewport();
+
+  await clickMiddleOfSky(page);
+  await expect(panel(page).getByRole('heading', { name: 'Far Away' })).toBeVisible();
+});
+
+test('a filter change frames the new Planets even after someone has flown in close', async ({ page }) => {
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await installMockIpc(page, withUniverses({ both: universe(), spotify: only('spotify'), youtube: only('youtube') }));
+  await openUniverse(page);
+  await expect(page.locator('canvas')).toBeVisible();
+  await page.getByRole('button', { name: 'Show list' }).click();
+  await page.getByRole('button', { name: /Moth Season/ }).click();
+  await page.getByRole('button', { name: 'Show 3D view' }).click();
+  await settled(page);
+  // Close up on one Planet, this one is far out of view.
+  await expect(page.locator('.label:visible', { hasText: 'Binary Tide' })).toHaveCount(0);
+
+  await page.getByRole('group', { name: 'Which Source to show' }).getByRole('button', { name: 'YouTube' }).click();
+  await settled(page);
+  await expect(page.getByRole('complementary')).toHaveCount(0);
+  for (const name of ['Tape Hiss TV', 'Cache Miss', 'Tiny Compilers']) {
+    await expect(page.locator('.label:visible', { hasText: name })).toBeInViewport();
+  }
+});
+
+test('a filter change closes the panel, since that Planet may not be in the new set', async ({ page }) => {
+  await installMockIpc(page, withUniverses({ both: detailed(), spotify: only('spotify', detailed()), youtube: only('youtube') }));
+  await openUniverse(page);
+  await page.getByRole('button', { name: 'Show list' }).click();
+  await page.getByRole('button', { name: /Moth Season/ }).click();
+  await expect(panel(page)).toBeVisible();
+
+  await page.getByRole('group', { name: 'Which Source to show' }).getByRole('button', { name: 'Spotify' }).click();
+  await expect(panel(page)).toHaveCount(0);
+});
+
+test('one source hides the other tab', async ({ page }) => {
+  const spotifyOnly = only('spotify');
+  await installMockIpc(page, withUniverses({ both: { ...spotifyOnly, filter: 'both' }, spotify: spotifyOnly, youtube: noUniverse }));
+  await openUniverse(page);
+
+  const tabs = page.getByRole('group', { name: 'Which Source to show' });
+  await expect(tabs.getByRole('button', { name: 'Spotify' })).toBeVisible();
+  await expect(tabs.getByRole('button', { name: 'Spotify' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(tabs.getByRole('button', { name: 'YouTube' })).toHaveCount(0);
+  // Both would be the same picture again.
+  await expect(tabs.getByRole('button', { name: 'Both' })).toHaveCount(0);
+  await expect(page.getByText('3 Planets, 0 Links, 2 Galaxies')).toBeVisible();
+});
+
+test('list item opens the planet panel', async ({ page }) => {
+  await installMockIpc(page, withUniverse(detailed()));
+  await openUniverse(page);
+  await expect(page.locator('canvas')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Show list' }).click();
+  const list = page.getByRole('list', { name: 'Planets, largest first' });
+  await expect(page.locator('canvas')).toBeHidden();
+  const items = list.getByRole('listitem');
+  await expect(items).toHaveCount(6);
+  // Sorted by size, with what a person needs to tell them apart.
+  await expect(items.first()).toContainText('Moth Season');
+  await expect(items.first()).toContainText('7 hours');
+  await expect(items.first()).toContainText('dreamy');
+  await expect(items.nth(1)).toContainText('Cache Miss');
+  await expect(items.nth(1)).toContainText('4 watches');
+
+  await list.getByRole('button', { name: /Moth Season/ }).click();
+  const details = panel(page);
+  await expect(details.getByRole('heading', { name: 'Moth Season' })).toBeVisible();
+  await expect(details).toContainText('7 hours on Spotify');
+  await expect(details).toContainText('dreamy Galaxy');
+  await expect(details.getByRole('listitem').filter({ hasText: 'dream pop' })).toBeVisible();
+  await expect(details.getByRole('listitem').filter({ hasText: 'shoegaze' })).toBeVisible();
+  // Item titles are on in the app, with a link for the ones that have one.
+  await expect(details.getByRole('link', { name: 'Low Tide' })).toBeVisible();
+  await expect(details.getByText('Paper Signal')).toBeVisible();
+  await expect(list.getByRole('button', { name: /Moth Season/ })).toHaveAttribute('aria-current', 'true');
+
+  await page.getByRole('button', { name: 'Show 3D view' }).click();
+  await expect(page.locator('canvas')).toBeVisible();
+  await expect(details.getByRole('heading', { name: 'Moth Season' })).toBeVisible();
+});
+
+test('the panel says why Planets are linked, and opens a neighbour from there', async ({ page }) => {
+  await installMockIpc(page, withUniverse(detailed()));
+  await openUniverse(page);
+  await page.getByRole('button', { name: 'Show list' }).click();
+  await page.getByRole('button', { name: /Moth Season/ }).click();
+
+  const linked = panel(page).getByRole('button', { name: /Tape Hiss TV/ });
+  await expect(linked).toContainText('shared Sessions');
+  await expect(panel(page).getByRole('button', { name: /Velvet Anchor/ })).toContainText('shared Interests: dreamy');
+  // Strongest first.
+  await expect(panel(page).locator('.linked li').first()).toContainText('Tape Hiss TV');
+
+  await linked.click();
+  const heading = panel(page).getByRole('heading', { level: 2 });
+  await expect(heading).toHaveText('Tape Hiss TV');
+  await expect(heading).toBeFocused();
+  await expect(panel(page)).toContainText('2 watches on YouTube');
+});
+
+test('Escape closes the panel and returns focus to the list item', async ({ page }) => {
+  await installMockIpc(page, withUniverse(detailed()));
+  await openUniverse(page);
+  await page.getByRole('button', { name: 'Show list' }).click();
+  const item = page.getByRole('button', { name: /Velvet Anchor/ });
+  await item.focus();
+  await page.keyboard.press('Enter');
+  const heading = panel(page).getByRole('heading', { level: 2 });
+  await expect(heading).toHaveText('Velvet Anchor');
+  await expect(heading).toBeFocused();
+
+  await page.keyboard.press('Escape');
+  await expect(panel(page)).toHaveCount(0);
+  await expect(item).toBeFocused();
+});
+
+test('Escape closes the panel and returns focus to the canvas', async ({ page }) => {
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await installMockIpc(page, withUniverse(onePlanet()));
+  await openUniverse(page);
+  const canvas = page.locator('canvas');
+  await expect(canvas).toBeVisible();
+  await settled(page);
+  await clickMiddleOfSky(page);
+  await expect(panel(page)).toBeVisible();
+
+  await page.keyboard.press('Escape');
+  await expect(panel(page)).toHaveCount(0);
+  await expect(canvas).toBeFocused();
+
+  // Escape with nothing open does nothing, and the close button does the same as Escape.
+  await page.keyboard.press('Escape');
+  await expect(canvas).toBeFocused();
+  await settled(page);
+  await clickMiddleOfSky(page);
+  await panel(page).getByRole('button', { name: 'Close Planet details' }).click();
+  await expect(panel(page)).toHaveCount(0);
+  await expect(canvas).toBeFocused();
+});
+
+test('the canvas says a list view is available', async ({ page }) => {
+  await installMockIpc(page, withUniverse());
+  await openUniverse(page);
+
+  const canvas = page.getByRole('img', { name: /list view/ });
+  await expect(canvas).toBeVisible();
+  await expect(canvas).toHaveAttribute('tabindex', '0');
+});
+
+test('every control can be reached and used from the keyboard', async ({ page }) => {
+  await installMockIpc(page, withUniverse(detailed()));
+  await openUniverse(page);
+  await expect(page.locator('canvas')).toBeVisible();
+
+  const reached = new Set<string>();
+  for (let press = 0; press < 40; press += 1) {
+    await page.keyboard.press('Tab');
+    const name = await page.evaluate(() => {
+      const el = document.activeElement as HTMLElement;
+      return el === document.body ? '' : el.tagName === 'CANVAS' ? 'canvas' : (el.innerText || el.getAttribute('aria-label') || el.tagName).trim();
+    });
+    if (name) reached.add(name);
+  }
+  for (const name of ['Spotify', 'YouTube', 'Both', 'Show list', 'canvas', 'Galaxies']) {
+    expect([...reached], `${name} was never reached`).toContain(name);
+  }
+
+  // The toggle works from the keyboard, and the list it opens is all buttons in reach.
+  await page.getByRole('button', { name: 'Show list' }).focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('button', { name: 'Show 3D view' })).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(page.getByRole('button', { name: /Moth Season/ })).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(panel(page).getByRole('heading', { level: 2 })).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(panel(page).getByRole('button', { name: 'Close Planet details' })).toBeFocused();
+});
+
+test('the arrow keys move the sky once the canvas has focus', async ({ page }) => {
+  await installMockIpc(page, withUniverse());
+  await openUniverse(page);
+  const canvas = page.locator('canvas');
+  await expect(canvas).toBeVisible();
+  await settled(page);
+  const label = page.locator('.label', { hasText: 'Moth Season' });
+  const before = await label.evaluate((node) => (node as HTMLElement).style.transform);
+
+  await canvas.focus();
+  await page.keyboard.press('ArrowLeft');
+  await page.keyboard.press('ArrowLeft');
+
+  await expect.poll(() => label.evaluate((node) => (node as HTMLElement).style.transform)).not.toBe(before);
+});
+
+test('a Source link opens in the system browser and leaves the window alone', async ({ page }) => {
+  const opened: string[] = [];
+  await installMockIpc(page, {
+    ...withUniverse(detailed()),
+    'plugin:opener|open_url': (args) => {
+      opened.push(args.url);
+      return null;
+    },
+  });
+  await openUniverse(page);
+  await page.getByRole('button', { name: 'Show list' }).click();
+  await page.getByRole('button', { name: /Moth Season/ }).click();
+  const url = page.url();
+  // A popup can arrive after any check for one, so look at the thing that would have let it open.
+  await page.evaluate(() => {
+    window.addEventListener('click', (e) => ((window as any).kept = !e.defaultPrevented));
+  });
+
+  await panel(page).getByRole('link', { name: 'Open in Spotify' }).click();
+  await expect.poll(() => opened).toEqual(['https://open.spotify.com/artist/abc']);
+  expect(await page.evaluate(() => (window as any).kept)).toBe(false);
+  await panel(page).getByRole('link', { name: 'Low Tide' }).click();
+  await expect.poll(() => opened).toEqual(['https://open.spotify.com/artist/abc', 'https://open.spotify.com/track/def']);
+
+  expect(page.url()).toBe(url);
+  expect(page.context().pages()).toHaveLength(1);
+  await expect(panel(page)).toBeVisible();
+});
+
+test('a link the opener refuses says so', async ({ page }) => {
+  await installMockIpc(page, {
+    ...withUniverse(detailed()),
+    'plugin:opener|open_url': () => {
+      throw new Error('Rostery could not open your browser.');
+    },
+  });
+  await openUniverse(page);
+  await page.getByRole('button', { name: 'Show list' }).click();
+  await page.getByRole('button', { name: /Moth Season/ }).click();
+
+  await panel(page).getByRole('link', { name: 'Open in Spotify' }).click();
+  await expect(page.getByRole('alert')).toContainText('could not open your browser');
+});
+
+test('a Planet with no way back has no link, and says the right words when it has one', async ({ page }) => {
+  const sky = detailed();
+  sky.planets[1].url = 'https://www.youtube.com/channel/UCabc';
+  await installMockIpc(page, withUniverse(sky));
+  await openUniverse(page);
+  await page.getByRole('button', { name: 'Show list' }).click();
+
+  await page.getByRole('button', { name: /Tape Hiss TV/ }).click();
+  await expect(panel(page).getByRole('link', { name: 'Open on YouTube' })).toHaveAttribute('href', 'https://www.youtube.com/channel/UCabc');
+
+  await page.getByRole('button', { name: /Cache Miss/ }).click();
+  await expect(panel(page).getByRole('heading', { level: 2 })).toHaveText('Cache Miss');
+  await expect(panel(page).getByRole('link')).toHaveCount(0);
+});
+
+test('the legend names the Galaxies and which Planet is which Source', async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await installMockIpc(page, withUniverses({ both: universe(), spotify: only('spotify'), youtube: only('youtube') }));
+  await openUniverse(page);
+
+  const legend = page.locator('.legend');
+  await expect(legend.getByRole('listitem')).toHaveCount(2);
+  await expect(legend).toContainText('dreamy');
+  await expect(legend).toContainText('tinkering');
+  await expect(legend).toContainText('Banded is Spotify');
+  await expect(legend).toContainText('Ringed is YouTube');
+
+  // With one Source on screen there is nothing to tell apart.
+  await page.getByRole('group', { name: 'Which Source to show' }).getByRole('button', { name: 'Spotify' }).click();
+  await expect(legend).not.toContainText('Banded is Spotify');
+});
+
+/** Many Planets on a grid, with sizes that fall away, so the largest are known. */
+function crowd(count: number): Universe {
+  const sky = universe();
+  const planets = Array.from({ length: count }, (_, i): Planet => ({
+    ...sky.planets[i % 2],
+    id: i,
+    name: `Creator ${i}`,
+    radius: 4 - (3.4 * i) / count,
+    position: [(i % 15) * 16 - 112, (Math.floor(i / 15) % 10) * 16 - 72, (i % 7) * 6 - 18],
+    galaxy: i % 2,
+  }));
+  return { ...sky, planets, links: [] };
+}
+
+test('150 Planets still carry at most 14 labels, and only the largest', async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await installMockIpc(page, withUniverse(crowd(150)));
+  await openUniverse(page);
+  await expect(page.locator('canvas')).toBeVisible();
+  await settled(page);
+
+  await expect(page.locator('.label')).toHaveCount(14);
+  const named = await page.locator('.label:visible').allInnerTexts();
+  expect(named.length).toBeGreaterThan(0);
+  expect(named.length).toBeLessThanOrEqual(12);
+  for (const name of named) expect(Number(name.split(' ')[1]), name).toBeLessThan(12);
+
+  // Labels never sit on top of one another.
+  const boxes = await page.locator('.label:visible').evaluateAll((nodes) => nodes.map((n) => n.getBoundingClientRect().toJSON()));
+  for (const [i, a] of boxes.entries()) {
+    for (const b of boxes.slice(i + 1)) {
+      expect(a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom).toBe(false);
+    }
+  }
+});
+
+const oddNames = [
+  'x'.repeat(10_000),
+  'موسيقى الليل الطويل جدا '.repeat(40),
+  '🪐🌙✨👩🏽‍🚀'.repeat(200),
+  `Ends with an override ‮evil‬ ${'word '.repeat(300)}`,
+];
+
+function oddSky(): Universe {
+  const sky = detailed();
+  sky.planets.slice(0, oddNames.length).forEach((p, i) => (p.name = oddNames[i]));
+  sky.galaxies[0].name = oddNames[0];
+  sky.planets[0].interests = [oddNames[1], oddNames[2]];
+  sky.planets[0].topItems = [{ title: oddNames[0], url: 'https://open.spotify.com/track/def', plays: 2 }];
+  sky.links[0].shared = [oddNames[1]];
+  return sky;
+}
+
+test('long, right to left and emoji names do not break the labels, panel or list', async ({ page }) => {
+  await installMockIpc(page, withUniverse(oddSky()));
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await openUniverse(page);
+  await expect(page.locator('canvas')).toBeVisible();
+  await settled(page);
+
+  for (const width of [1000, 640]) {
+    await page.setViewportSize({ width, height: 700 });
+    await settled(page);
+    for (const label of await page.locator('.label:visible').all()) {
+      const box = (await label.boundingBox())!;
+      expect(box.width, 'a label stays narrow').toBeLessThanOrEqual(230);
+      expect(box.height, 'a label stays on one line').toBeLessThanOrEqual(60);
+    }
+
+    await page.getByRole('button', { name: 'Show list' }).click();
+    for (const row of await page.getByRole('list', { name: 'Planets, largest first' }).getByRole('listitem').all()) {
+      expect((await row.boundingBox())!.height, 'a row keeps to a few lines').toBeLessThan(160);
+    }
+    await page.getByRole('button', { name: new RegExp(oddNames[0].slice(0, 50)) }).first().click();
+    const details = panel(page);
+    await expect(details).toBeVisible();
+    expect((await details.getByRole('heading', { level: 2 }).boundingBox())!.height).toBeLessThan(200);
+    const overflow = await page.evaluate(() => {
+      const main = document.querySelector('main')!;
+      const aside = document.querySelector('aside')!;
+      return { main: main.scrollWidth - main.clientWidth, aside: aside.scrollWidth - aside.clientWidth, tall: aside.scrollHeight };
+    });
+    expect(overflow.main, `main scrolls sideways at ${width}px`).toBeLessThanOrEqual(0);
+    expect(overflow.aside, `the panel scrolls sideways at ${width}px`).toBeLessThanOrEqual(0);
+    // Long words in every field still leave the link at the end a short scroll away.
+    expect(overflow.tall, `the panel is too tall at ${width}px`).toBeLessThan(1300);
+    await details.getByRole('button', { name: 'Close Planet details' }).click();
+    await page.getByRole('button', { name: 'Show 3D view' }).click();
+  }
+
+  // Right to left text reads right to left, whichever way the page runs.
+  await page.getByRole('button', { name: 'Show list' }).click();
+  const rtl = page.getByRole('button', { name: /موسيقى/ }).first();
+  expect(await rtl.locator('.name').evaluate((n) => getComputedStyle(n).direction)).toBe('rtl');
+  await rtl.click();
+  expect(await panel(page).getByRole('heading', { level: 2 }).evaluate((n) => getComputedStyle(n).direction)).toBe('rtl');
+});
+
+test('labels never overlap the panel on small windows', async ({ page }) => {
+  await installMockIpc(page, withUniverse(crowd(60)));
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await openUniverse(page);
+  await expect(page.locator('canvas')).toBeVisible();
+  await settled(page);
+  await page.getByRole('button', { name: 'Show list' }).click();
+  await page.getByRole('button', { name: 'Creator 0', exact: false }).first().click();
+  await page.getByRole('button', { name: 'Show 3D view' }).click();
+
+  for (const [width, height] of [[1200, 800], [800, 600], [640, 480], [500, 500], [420, 480]]) {
+    await page.setViewportSize({ width, height });
+    await settled(page);
+    await settled(page);
+    const side = (await page.getByRole('complementary').boundingBox())!;
+    expect(side.height).toBeGreaterThan(0);
+    const labels = await page.locator('.label:visible').evaluateAll((nodes) => nodes.map((n) => n.getBoundingClientRect().toJSON()));
+    for (const box of labels) {
+      const hit = box.left < side.x + side.width && side.x < box.right && box.top < side.y + side.height && side.y < box.bottom;
+      expect(hit, `a label at ${box.left},${box.top} is on the panel at ${width}x${height}`).toBe(false);
+    }
+    // And there is no way for the page itself to scroll sideways.
+    const sideways = await page.evaluate(() => document.querySelector('main')!.scrollWidth - document.querySelector('main')!.clientWidth);
+    expect(sideways).toBeLessThanOrEqual(0);
+  }
+});
+
+const labelPlace = (page: Page) =>
+  page.locator('.label:visible').first().evaluate((node) => (node as HTMLElement).style.transform);
+
+test('auto-rotation turns the sky until someone touches it', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await page.setViewportSize({ width: 800, height: 600 });
+  await installMockIpc(page, withUniverse());
+  await openUniverse(page);
+  const canvas = page.locator('canvas');
+  await expect(canvas).toBeVisible();
+  // It opens with one long approach, and turns once that is over.
+  await page.waitForTimeout(2500);
+
+  const first = await labelPlace(page);
+  await expect.poll(() => labelPlace(page), { timeout: 15_000 }).not.toBe(first);
+
+  const box = (await canvas.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2 + 120, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 + 121, box.y + box.height / 2);
+  await page.mouse.up();
+  // A sky that has been let go drifts on for a moment. Turning by itself would never stop.
+  await expect(async () => {
+    const stopped = await labelPlace(page);
+    await page.waitForTimeout(1500);
+    expect(await labelPlace(page)).toBe(stopped);
+  }).toPass({ timeout: 15_000 });
+});
+
+test('auto-rotation is off under prefers-reduced-motion', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.setViewportSize({ width: 800, height: 600 });
+  await installMockIpc(page, withUniverse());
+  await openUniverse(page);
+  const canvas = page.locator('canvas');
+  await expect(canvas).toBeVisible();
+  await settled(page);
+
+  const [place, picture] = [await labelPlace(page), await canvasPng(page, canvas)];
+  await page.waitForTimeout(1500);
+  expect(await labelPlace(page)).toBe(place);
+  expect(await canvasPng(page, canvas)).toBe(picture);
 });
 
 test('a file dropped on another screen opens Sources and imports there', async ({ page }) => {
