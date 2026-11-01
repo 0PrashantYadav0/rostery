@@ -1,8 +1,10 @@
 //! Importing a Spotify Export. Every name and address here is invented.
 
 use rostery_core::demo;
+use rostery_core::digest;
 use rostery_core::ingest::{import_path, import_paths, ImportSummary};
 use rostery_core::model::{Origin, Play, Source};
+use rostery_core::roast::Roast;
 use rostery_core::store::Store;
 use serde_json::{json, Value};
 use std::io::Write;
@@ -1099,14 +1101,71 @@ fn real_history_removes_demo_data() {
 
 #[test]
 fn an_import_that_adds_nothing_leaves_demo_data_alone() {
+    let (mut store, dir, _file) = demo_store_and_export();
+    let mut private = extended("2024-03-01T13:05:42Z", "Real Band", "Real Song", 200_000);
+    private["incognito_mode"] = json!(true);
+    let only_private = write_json(
+        dir.path(),
+        "Streaming_History_Audio_2024_1.json",
+        &json!([private]),
+    );
+
+    let summary = import_path(&mut store, &only_private).unwrap();
+
+    assert_eq!((summary.added, summary.demo_plays_removed), (0, 0));
+    assert_eq!(summary.excluded_private, 1);
+    assert!(store.has_demo_data().unwrap());
+    assert!(!store.has_real_plays().unwrap());
+}
+
+#[test]
+fn demo_data_cannot_join_real_history_afterwards() {
     let (mut store, _dir, file) = demo_store_and_export();
     import_path(&mut store, &file).unwrap();
-    demo::load(&mut store, 1_800_000_000).unwrap();
 
-    let again = import_path(&mut store, &file).unwrap();
+    assert!(demo::load(&mut store, 1_800_000_000).is_err());
 
-    assert_eq!((again.added, again.demo_plays_removed), (0, 0));
-    assert!(store.has_demo_data().unwrap());
+    assert!(!store.has_demo_data().unwrap());
+    let digest = digest::from_store(&store, 1_800_000_000).unwrap();
+    let spotify = digest.spotify.unwrap();
+    assert_eq!(spotify.plays, 1);
+    assert_eq!(spotify.top_creators[0].name, "Real Band");
+    assert!(digest.youtube.is_none());
+}
+
+fn a_roast() -> Roast {
+    serde_json::from_value(json!({
+        "headline": "Made Up",
+        "opening": "You.",
+        "burns": [{"title": "Burn", "body": "Ouch."}],
+        "verdict": {"archetype": "Night Clerk", "score": 40, "sentence": "Sit down."},
+    }))
+    .unwrap()
+}
+
+#[test]
+fn real_history_takes_a_roast_of_the_demo_with_it() {
+    let (mut store, _dir, file) = demo_store_and_export();
+    store
+        .save_roast("Claude Code", &a_roast(), 1000, true)
+        .unwrap();
+
+    import_path(&mut store, &file).unwrap();
+
+    assert_eq!(store.latest_roast().unwrap(), None);
+}
+
+#[test]
+fn an_import_that_fails_keeps_a_roast_of_the_demo() {
+    let (mut store, dir, _file) = demo_store_and_export();
+    let saved = store
+        .save_roast("Claude Code", &a_roast(), 1000, true)
+        .unwrap();
+    let notes = write_json(dir.path(), "notes.json", &json!({"not": "history"}));
+
+    assert!(import_path(&mut store, &notes).is_err());
+
+    assert_eq!(store.latest_roast().unwrap(), Some(saved));
 }
 
 #[test]

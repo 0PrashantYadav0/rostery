@@ -20,6 +20,6 @@ export function describeImport(s: ImportSummary): string {
   if (s.rejected) parts.push(`Left out ${count(s.rejected, 'row', 'rows')} Rostery could not use.`);
   if (s.filesSkipped) parts.push(`Left out ${count(s.filesSkipped, 'file', 'files')} Rostery could not read.`);
   if (s.skippedReason) parts.push(s.skippedReason);
-  if (s.demoPlaysRemoved) parts.push('Removed the demo data, so only your real history is left.');
+  if (s.demoPlaysRemoved) parts.push('Removed the demo data and any Roast of it, so only your real history is left.');
   return parts.join(' ');
 }

@@ -100,6 +100,7 @@ affinities(source, creator, creator_ref, kind, score, fetched_at,
 interests(source, creator, interest, origin, fetched_at,
           PRIMARY KEY (source, creator, interest, origin))
 roasts(id, created_at, provider_label, json)
+demo_roasts(roast_id PRIMARY KEY)
 settings(key PRIMARY KEY, value)
 ```
 
@@ -109,7 +110,7 @@ Two rules keep Origins consistent. When an Export is imported and every file in 
 
 Private sessions (`incognito_mode: true`) and Google ads (`details` holding "From Google Ads") are dropped at ingest and counted in the import summary. Spotify's account format has no private flag, so an extended private row also removes the account copy of that Play, whether it is already stored or comes later in the same import. An account file imported on its own after the extended one cannot be caught, because remembering private Plays would mean writing them to disk. A YouTube video that has since been deleted has no `subtitles`, and a removed one has no link either. It is kept with an empty Creator because it makes a good joke, and it never becomes a Planet. A Takeout row is a Play only when it links to a watch or Shorts video, or to nothing. Searches, subscriptions, likes, community posts and other Google products in the same file are ignored without counting as rejected.
 
-Clearing demo data removes demo Plays, demo Interests and demo Affinities in one transaction. Affinities have no Origin column, so a demo one has the kind `demo`. An import that adds at least one Play does this by itself and says so in its summary, and a Connection's sync will do the same, because a Roast of made-up Plays mixed with real ones would be wrong.
+Clearing demo data removes demo Plays, demo Interests, demo Affinities and any Roast of them in one transaction. Affinities have no Origin column, so a demo one has the kind `demo`. `demo_roasts` lists each Roast whose Digest was built while demo Plays were stored. An import that adds at least one Play clears demo data by itself and says so in its summary, and a Connection's sync will do the same, because a Roast of made-up Plays mixed with real ones would be wrong. For the same reason, demo data refuses to load once any real Play is stored, and the app stops offering it.
 
 ## Universe
 
@@ -147,7 +148,7 @@ A Roast is one JSON document:
 
 Rostery extracts the first JSON object from the reply that is a Roast, tolerating code fences and prose. It retries once with a reminder on bad JSON, clamps `score` to 0..=100, fails if `burns` is empty, and caps every field and list, with at most 12 Burns, so a Provider cannot blow up the screen or a Share Site. A failed run never replaces the previous Roast.
 
-One Roast runs at a time, which Rust enforces as well as the screen. It belongs to the app and not to the screen, so it survives moving between screens. Quitting the app stops a CLI that is still running.
+One Roast runs at a time, which Rust enforces as well as the screen. It belongs to the app and not to the screen, so it survives moving between screens. Quitting the app stops a CLI that is still running. If the demo data a Roast is about leaves while it runs, the Roast is not kept, and the error says to press Roast me.
 
 A second, cheaper prompt in `prompts/interests.md` asks for up to 3 Interests per Creator for the top 80 Creators that do not have any from AI yet. The result is cached. This is what links a lo-fi YouTube channel to a Spotify artist when they never shared a Session. If it fails, the Roast still runs.
 

@@ -32,7 +32,7 @@ describe('describeImport', () => {
 
   it('says when real history took the place of the demo data', () => {
     expect(describeImport({ ...noImport, added: 2, demoPlaysRemoved: 1937 })).toBe(
-      'Added 2 Plays. Removed the demo data, so only your real history is left.',
+      'Added 2 Plays. Removed the demo data and any Roast of it, so only your real history is left.',
     );
   });
 

@@ -43,6 +43,9 @@ CREATE TABLE IF NOT EXISTS roasts (
     provider_label TEXT NOT NULL,
     json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS demo_roasts (
+    roast_id INTEGER PRIMARY KEY
+);
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -257,6 +260,15 @@ impl Store {
         )?)
     }
 
+    /// Any Play with an Origin other than demo, whether from an Export or a Connection.
+    pub fn has_real_plays(&self) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM plays WHERE origin <> 'demo')",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
     pub fn delete_origin(&mut self, source: Source, origin: Origin) -> Result<u64> {
         Ok(self.conn.execute(
             "DELETE FROM plays WHERE source = ?1 AND origin = ?2",
@@ -264,12 +276,19 @@ impl Store {
         )? as u64)
     }
 
-    /// One transaction, so demo data never half leaves. Returns how many Plays went.
+    /// One transaction, so demo data never half leaves. That includes any Roast written from it, which
+    /// is jokes about made-up names, and a Share Site could otherwise publish it as this person's.
+    /// Returns how many Plays went.
     pub fn delete_demo(&mut self) -> Result<u64> {
         let tx = self.conn.transaction()?;
         let plays = tx.execute("DELETE FROM plays WHERE origin = 'demo'", [])?;
         tx.execute("DELETE FROM interests WHERE origin = 'demo'", [])?;
         tx.execute("DELETE FROM affinities WHERE kind = ?1", [DEMO_KIND])?;
+        tx.execute(
+            "DELETE FROM roasts WHERE id IN (SELECT roast_id FROM demo_roasts)",
+            [],
+        )?;
+        tx.execute("DELETE FROM demo_roasts", [])?;
         tx.commit()?;
         Ok(plays as u64)
     }
@@ -377,18 +396,28 @@ impl Store {
     }
 
     /// Only a finished Roast gets here, so a failed run can never replace the one before it.
+    /// `from_demo` says demo Plays were stored when its Digest was built, so it leaves with them. That
+    /// is in a table of its own because `CREATE TABLE IF NOT EXISTS` is all an older store needs, while
+    /// an `ALTER TABLE` could run twice when two commands open that store at the same moment.
     pub fn save_roast(
         &self,
         provider_label: &str,
         roast: &Roast,
         created_at: i64,
+        from_demo: bool,
     ) -> Result<StoredRoast> {
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO roasts (created_at, provider_label, json) VALUES (?1, ?2, ?3)",
             params![created_at, provider_label, serde_json::to_string(roast)?],
         )?;
+        let id = tx.last_insert_rowid();
+        if from_demo {
+            tx.execute("INSERT INTO demo_roasts (roast_id) VALUES (?1)", [id])?;
+        }
+        tx.commit()?;
         Ok(StoredRoast {
-            id: self.conn.last_insert_rowid(),
+            id,
             created_at,
             provider_label: provider_label.to_owned(),
             roast: roast.clone(),
@@ -579,6 +608,28 @@ mod tests {
         let left = store.plays(None).unwrap();
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].origin, Origin::Export);
+    }
+
+    #[test]
+    fn has_real_plays_is_any_origin_but_demo() {
+        let mut store = Store::open_in_memory().unwrap();
+        assert!(!store.has_real_plays().unwrap());
+        store
+            .insert_plays(&[play(
+                Source::Spotify,
+                "The Paper Lanterns",
+                "Low Tide",
+                1000,
+            )])
+            .unwrap();
+        assert!(!store.has_real_plays().unwrap());
+        for origin in [Origin::Export, Origin::Api] {
+            let mut store = Store::open_in_memory().unwrap();
+            let mut real = play(Source::Spotify, "Real Band", "Real Song", 2000);
+            real.origin = origin;
+            store.insert_plays(&[real]).unwrap();
+            assert!(store.has_real_plays().unwrap(), "{origin:?}");
+        }
     }
 
     #[test]
@@ -800,6 +851,70 @@ mod tests {
             .unwrap();
         assert!(matches!(store.affinities(), Err(Error::Db(_))));
         assert!(matches!(store.interests(), Err(Error::Db(_))));
+    }
+
+    fn a_roast(headline: &str) -> Roast {
+        let burn = crate::roast::Burn {
+            title: "Burn".into(),
+            body: "Ouch.".into(),
+        };
+        Roast {
+            headline: headline.into(),
+            opening: "You.".into(),
+            burns: vec![burn],
+            verdict: crate::roast::Verdict {
+                archetype: "Night Clerk".into(),
+                score: 40,
+                sentence: "Sit down.".into(),
+                evidence: Vec::new(),
+            },
+            galaxy_names: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn delete_demo_takes_a_roast_of_the_demo_and_leaves_a_roast_of_real_history() {
+        let mut store = Store::open_in_memory().unwrap();
+        let real = store
+            .save_roast("Claude Code", &a_roast("Real"), 1000, false)
+            .unwrap();
+        store
+            .save_roast("Claude Code", &a_roast("Made Up"), 2000, true)
+            .unwrap();
+        assert_eq!(
+            store.latest_roast().unwrap().unwrap().roast.headline,
+            "Made Up"
+        );
+
+        store.delete_demo().unwrap();
+        assert_eq!(store.latest_roast().unwrap(), Some(real.clone()));
+
+        // A Roast saved later is not marked by what came before it, even if it gets the old id.
+        let next = store
+            .save_roast("Claude Code", &a_roast("Next"), 3000, false)
+            .unwrap();
+        store.delete_demo().unwrap();
+        assert_eq!(store.latest_roast().unwrap(), Some(next));
+    }
+
+    #[test]
+    fn a_store_from_before_demo_roasts_were_marked_still_works() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE roasts (
+                id INTEGER PRIMARY KEY,
+                created_at INTEGER NOT NULL,
+                provider_label TEXT NOT NULL,
+                json TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+        let mut store = Store::init(conn).unwrap();
+        store
+            .save_roast("Claude Code", &a_roast("Made Up"), 1000, true)
+            .unwrap();
+        store.delete_demo().unwrap();
+        assert_eq!(store.latest_roast().unwrap(), None);
     }
 
     #[test]

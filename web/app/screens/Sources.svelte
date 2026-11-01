@@ -137,6 +137,8 @@
   });
 
   const all = $derived(totals.spotify.plays + totals.youtube.plays);
+  // Rust refuses demo data once there is real history, so there is nothing here to offer.
+  const realHistoryOnly = $derived(loaded && all > 0 && !hasDemo);
   // Each dial's arc is that Source's share of every Play stored.
   const dials = $derived(
     (['spotify', 'youtube'] as const).map((key) => ({
@@ -165,15 +167,17 @@
   </header>
 
   <!-- Above the dials, because they are what this button changes, and they have to be on screen when it does. A WebKit webview skips a button on Tab without a tabindex. -->
-  <div class="actions">
-    <button class:primary={loaded && all === 0} tabindex="0" bind:this={tryDemo} onclick={() => run(loadDemo)} aria-disabled={busy}>Try demo data</button>
-    {#if hasDemo}
-      <button tabindex="0" onclick={clearDemoData} aria-disabled={busy}>Clear demo data</button>
-    {/if}
-    {#if loaded && all === 0}
-      <p>Nothing here yet. Demo data is made-up history, so you can look around first.</p>
-    {/if}
-  </div>
+  {#if !realHistoryOnly}
+    <div class="actions">
+      <button class:primary={loaded && all === 0} tabindex="0" bind:this={tryDemo} onclick={() => run(loadDemo)} aria-disabled={busy}>Try demo data</button>
+      {#if hasDemo}
+        <button tabindex="0" onclick={clearDemoData} aria-disabled={busy}>Clear demo data</button>
+      {/if}
+      {#if loaded && all === 0}
+        <p>Nothing here yet. Demo data is made-up history, so you can look around first.</p>
+      {/if}
+    </div>
+  {/if}
 
   <div class="dials">
     {#each dials as { key, name, t, share }}

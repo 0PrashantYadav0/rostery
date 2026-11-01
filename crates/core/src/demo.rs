@@ -1,6 +1,6 @@
 //! Fictional history for trying Rostery without an account. Every name is invented.
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::model::{Origin, Play, Source};
 use crate::store::{InsertCount, Store};
 
@@ -284,9 +284,13 @@ pub fn generate(seed: u64, now: i64) -> DemoData {
     DemoData { plays, interests }
 }
 
-/// Stores the demo. The first load fixes the demo's clock, so loading again adds nothing.
+/// Stores the demo. The first load fixes the demo's clock, so loading again adds nothing. Real history
+/// keeps it out, as real history arriving later clears it, so the two never mix in a Digest.
 // ponytail: the clock is never reset, so an old demo ages; add a delete_setting to reset it on clear.
 pub fn load(store: &mut Store, now: i64) -> Result<InsertCount> {
+    if store.has_real_plays()? {
+        return Err(Error::RealHistoryStored);
+    }
     let anchor = match store.get_setting::<i64>("demo_now")? {
         Some(t) => t,
         None => {
@@ -301,7 +305,7 @@ pub fn load(store: &mut Store, now: i64) -> Result<InsertCount> {
     store.insert_plays(&demo.plays)
 }
 
-/// Removes demo Plays, Interests and Affinities. What came from an Export or Connection stays.
+/// Removes demo Plays, Interests, Affinities and Roasts. What came from an Export or Connection stays.
 pub fn clear(store: &mut Store) -> Result<u64> {
     store.delete_demo()
 }
@@ -398,6 +402,31 @@ mod tests {
             interests[&(Source::Spotify, "Moth Season".to_string())],
             ["dream pop", "dreamy", "headphones", "shoegaze"]
         );
+    }
+
+    #[test]
+    fn demo_data_stays_out_once_real_plays_are_stored() {
+        let mut store = Store::open_in_memory().unwrap();
+        let real = Play {
+            source: Source::Spotify,
+            origin: Origin::Export,
+            played_at: NOW,
+            duration_ms: Some(200_000),
+            creator: "Real Band".into(),
+            creator_ref: None,
+            item: "Real Song".into(),
+            item_ref: None,
+            skipped: false,
+        };
+        store.insert_plays(std::slice::from_ref(&real)).unwrap();
+
+        let message = load(&mut store, NOW).unwrap_err().to_string();
+
+        assert!(message.contains("already here"), "{message}");
+        assert!(message.contains("Universe"), "{message}");
+        assert_eq!(store.plays(None).unwrap(), [real]);
+        assert!(store.interests().unwrap().is_empty());
+        assert_eq!(store.get_setting::<i64>("demo_now").unwrap(), None);
     }
 
     #[test]

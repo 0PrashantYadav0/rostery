@@ -37,9 +37,8 @@ test('demo button shows totals', async ({ page }) => {
 });
 
 test('clear demo data only shows while demo data exists', async ({ page }) => {
-  // Real history is already stored, so Plays exist but none of them is demo.
-  const real: SourceTotals = { plays: 500, minutes: 1000, creators: 40, firstPlay: 1_700_000_000, lastPlay: 1_790_000_000 };
-  let stored: Totals = { spotify: real, youtube: none };
+  const nothingStored: Totals = { spotify: none, youtube: none };
+  let stored = nothingStored;
   let demo = false;
   const calls: string[] = [];
   await installMockIpc(page, {
@@ -47,20 +46,19 @@ test('clear demo data only shows while demo data exists', async ({ page }) => {
     has_demo_data: () => demo,
     load_demo: () => {
       demo = true;
-      stored = { ...stored, youtube: { ...none, plays: 90, creators: 9 } };
+      stored = { spotify: { ...none, plays: 90, creators: 9 }, youtube: none };
       return stored;
     },
     clear_demo: () => {
       calls.push('clear_demo');
       demo = false;
-      stored = { spotify: real, youtube: none };
+      stored = nothingStored;
       return stored;
     },
   });
 
   await page.goto('/');
-  const region = page.getByRole('region', { name: 'Spotify' });
-  await expect(region.getByText('500', { exact: true })).toBeVisible();
+  await expect(page.getByText('Nothing here yet')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Clear demo data' })).toBeHidden();
 
   await page.getByRole('button', { name: 'Try demo data' }).click();
@@ -68,8 +66,36 @@ test('clear demo data only shows while demo data exists', async ({ page }) => {
 
   await page.getByRole('button', { name: 'Clear demo data' }).click();
   await expect(page.getByRole('button', { name: 'Clear demo data' })).toBeHidden();
-  await expect(region.getByText('500', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Try demo data' })).toBeVisible();
   expect(calls).toEqual(['clear_demo']);
+});
+
+test('demo data is not offered once real history is stored', async ({ page }) => {
+  const real: SourceTotals = { plays: 500, minutes: 1000, creators: 40, firstPlay: 1_700_000_000, lastPlay: 1_790_000_000 };
+  await installMockIpc(page, { totals: () => ({ spotify: real, youtube: none }), has_demo_data: () => false });
+
+  await page.goto('/');
+  await expect(page.getByRole('region', { name: 'Spotify' }).getByText('500', { exact: true })).toBeVisible();
+
+  await expect(page.getByRole('button', { name: 'Try demo data' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Clear demo data' })).toHaveCount(0);
+});
+
+test('the refusal to mix demo data with real history is shown', async ({ page }) => {
+  // A store from an earlier build can hold both, so the button is still there and Rust says no.
+  const message = 'Your own history is already here, so Rostery keeps demo data out of it.';
+  await installMockIpc(page, {
+    ...withHistory,
+    has_demo_data: () => true,
+    load_demo: () => {
+      throw new Error(message);
+    },
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Try demo data' }).click();
+
+  await expect(page.getByRole('alert')).toHaveText(message);
 });
 
 test('import summary appears', async ({ page }) => {
@@ -193,8 +219,9 @@ async function dragFile(page: Page) {
 
 test('importing real history takes the demo data away and says so', async ({ page }) => {
   let demo = true;
+  const real: SourceTotals = { ...none, plays: 5, creators: 1 };
   await installMockIpc(page, {
-    totals: () => ({ spotify: none, youtube: none }),
+    totals: () => ({ spotify: demo ? { ...none, plays: 1937, creators: 60 } : real, youtube: none }),
     has_demo_data: () => demo,
     'plugin:dialog|open': () => ['/d/my_spotify_data.zip'],
     import_paths: () => {
@@ -207,8 +234,9 @@ test('importing real history takes the demo data away and says so', async ({ pag
   await expect(page.getByRole('button', { name: 'Clear demo data' })).toBeVisible();
   await page.getByRole('button', { name: 'Choose file' }).click();
 
-  await expect(page.getByRole('status')).toHaveText('Added 5 Plays. Removed the demo data, so only your real history is left.');
+  await expect(page.getByRole('status')).toHaveText('Added 5 Plays. Removed the demo data and any Roast of it, so only your real history is left.');
   await expect(page.getByRole('button', { name: 'Clear demo data' })).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Try demo data' })).toHaveCount(0);
 });
 
 test('a file dropped during an import is not silently ignored', async ({ page }) => {
@@ -2316,12 +2344,28 @@ test('with no history the Roast screen asks for some in place of offering to cal
   expect(calls).toBe(0);
 });
 
-test('the last Roast stays when the history it came from has gone', async ({ page }) => {
-  await installMockIpc(page, { ...empty, latest_roast: () => aRoast });
+test('clearing demo data takes its Roast off the Roast screen', async ({ page }) => {
+  let demo = true;
+  const nothingStored: Totals = { spotify: none, youtube: none };
+  await installMockIpc(page, {
+    totals: () => (demo ? someHistory : nothingStored),
+    has_demo_data: () => demo,
+    latest_roast: () => (demo ? aRoast : null),
+    clear_demo: () => {
+      demo = false;
+      return nothingStored;
+    },
+  });
   await openRoast(page);
+  await expect(page.getByRole('heading', { level: 2, name: aRoast.roast.headline })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Sources', exact: true }).click();
+  await page.getByRole('button', { name: 'Clear demo data' }).click();
+  await expect(page.getByRole('button', { name: 'Clear demo data' })).toBeHidden();
+  await page.getByRole('button', { name: 'Roast', exact: true }).click();
 
   await expect(page.getByText('There is nothing to roast yet.')).toBeVisible();
-  await expect(page.getByRole('heading', { level: 2, name: aRoast.roast.headline })).toBeVisible();
+  await expect(page.locator('article')).toHaveCount(0);
   await expect(roastButton(page)).toHaveCount(0);
 });
 

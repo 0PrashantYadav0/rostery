@@ -100,6 +100,7 @@ fn run_roast(state: &AppState, progress: impl Fn(&str) + Sync) -> Result<StoredR
         };
     progress("Reading your history");
     let store = Store::open(&state.db_path)?;
+    let from_demo = store.has_demo_data()?;
     let digest = digest::from_store(&store, now())?;
     let provider = Provider::ClaudeCode { model: None };
     let (finished, waiting) = mpsc::channel::<()>();
@@ -122,7 +123,15 @@ fn run_roast(state: &AppState, progress: impl Fn(&str) + Sync) -> Result<StoredR
         drop(finished);
         roast
     })?;
-    store.save_roast(provider.label(), &roast, now())
+    // Sources stays usable during a Roast, so the demo this one is about can leave before it lands.
+    if from_demo && !store.has_demo_data()? {
+        return Err(Error::Provider(
+            "Your history changed while this Roast was being written, so Rostery did not keep it. \
+             Press Roast me to write one about what is stored now."
+                .to_owned(),
+        ));
+    }
+    store.save_roast(provider.label(), &roast, now(), from_demo)
 }
 
 #[tauri::command(async)]
@@ -147,6 +156,7 @@ pub fn digest_preview(state: State<'_, AppState>) -> Result<Digest, Error> {
 #[cfg(all(test, debug_assertions))]
 mod tests {
     use super::*;
+    use rostery_core::model::{Origin, Play, Source};
     use std::os::unix::fs::PermissionsExt;
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::sync::MutexGuard;
@@ -280,6 +290,71 @@ mod tests {
 
         assert!(message.contains("Usage limit reached"), "{message}");
         assert_eq!(rig.latest(), Some(saved));
+    }
+
+    #[test]
+    fn a_roast_of_demo_data_goes_when_the_demo_does() {
+        let rig = Rig::with_history(CAT_REPLY, REPLY);
+        run_roast(&rig.state, silent).unwrap();
+        assert!(rig.latest().is_some());
+
+        demo::clear(&mut Store::open(&rig.state.db_path).unwrap()).unwrap();
+
+        assert_eq!(rig.latest(), None);
+    }
+
+    #[test]
+    fn a_roast_of_real_history_stays_when_demo_data_is_cleared() {
+        let rig = Rig::new(CAT_REPLY);
+        rig.reply(REPLY);
+        let mut store = Store::open(&rig.state.db_path).unwrap();
+        store
+            .insert_plays(&[Play {
+                source: Source::Spotify,
+                origin: Origin::Export,
+                played_at: 1_700_000_000,
+                duration_ms: Some(200_000),
+                creator: "Real Band".into(),
+                creator_ref: None,
+                item: "Real Song".into(),
+                item_ref: None,
+                skipped: false,
+            }])
+            .unwrap();
+        let saved = run_roast(&rig.state, silent).unwrap();
+
+        demo::clear(&mut store).unwrap();
+
+        assert_eq!(rig.latest(), Some(saved));
+    }
+
+    /// The Digest went out while the demo was stored, so the Roast that comes back is about it.
+    #[test]
+    fn a_roast_of_demo_data_that_lands_after_the_demo_left_is_not_kept() {
+        let rig = Rig::with_history(
+            "touch \"$here/started\"\n\
+             while [ ! -e \"$here/go\" ]; do sleep 0.02; done\n\
+             cat \"$here/reply\"",
+            REPLY,
+        );
+        let (started, go) = (rig.dir.path().join("started"), rig.dir.path().join("go"));
+
+        let result = std::thread::scope(|scope| {
+            let run = scope.spawn(|| run_roast(&rig.state, silent));
+            let until = Instant::now() + Duration::from_secs(10);
+            while !started.exists() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(started.exists(), "the Roast never began");
+
+            demo::clear(&mut Store::open(&rig.state.db_path).unwrap()).unwrap();
+            std::fs::write(&go, "").unwrap();
+            run.join().unwrap()
+        });
+
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains("Roast me"), "{message}");
+        assert_eq!(rig.latest(), None);
     }
 
     #[test]

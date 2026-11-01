@@ -550,11 +550,13 @@ mod tests {
 
     #[test]
     fn failed_run_keeps_previous_roast() {
-        let mut store = Store::open_in_memory().unwrap();
+        let store = Store::open_in_memory().unwrap();
         assert_eq!(store.latest_roast().unwrap(), None);
         let good = good();
         let first = run(&[&good], &digest()).0.unwrap();
-        let saved = store.save_roast("Claude Code", &first, 1000).unwrap();
+        let saved = store
+            .save_roast("Claude Code", &first, 1000, false)
+            .unwrap();
 
         // A run that fails leaves nothing to save, so what was there stays.
         assert!(run(&["bad", "bad"], &digest()).0.is_err());
@@ -564,14 +566,11 @@ mod tests {
             headline: "A Newer One".into(),
             ..first
         };
-        let newer = store.save_roast("Claude Code", &second, 2000).unwrap();
+        let newer = store
+            .save_roast("Claude Code", &second, 2000, false)
+            .unwrap();
         assert!(newer.id > saved.id);
         assert_eq!(store.latest_roast().unwrap().unwrap(), newer);
-        store.delete_demo().unwrap();
-        assert_eq!(
-            store.latest_roast().unwrap().unwrap().roast.headline,
-            "A Newer One"
-        );
     }
 
     #[test]
@@ -579,7 +578,9 @@ mod tests {
         let good = good();
         let roast = run(&[&good], &digest()).0.unwrap();
         let store = Store::open_in_memory().unwrap();
-        let saved = store.save_roast("Claude Code", &roast, 1000).unwrap();
+        let saved = store
+            .save_roast("Claude Code", &roast, 1000, false)
+            .unwrap();
         let value = serde_json::to_value(&saved).unwrap();
         assert_eq!(value["providerLabel"], "Claude Code");
         assert_eq!(value["createdAt"], 1000);
