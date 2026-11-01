@@ -1,9 +1,10 @@
 use crate::error::{Error, Result};
 use crate::model::{Affinity, InterestMap, Origin, Play, Source, SourceTotals, Totals};
-use crate::roast::{Roast, StoredRoast};
+use crate::roast::{FinishedRoast, Roast, StoredRoast};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{de::DeserializeOwned, Serialize};
 use std::path::Path;
+use std::time::Duration;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS plays (
@@ -393,6 +394,40 @@ impl Store {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Saves a finished Roast, waiting for up to `wait` on a busy database in place of the usual 5
+    /// seconds. Whatever happens there is a Roast to read, with a sentence when it was not kept.
+    pub fn keep_roast(
+        &self,
+        provider_label: &str,
+        roast: Roast,
+        created_at: i64,
+        from_demo: bool,
+        wait: Duration,
+    ) -> FinishedRoast {
+        let saved = self
+            .conn
+            .busy_timeout(wait)
+            .map_err(Error::from)
+            .and_then(|()| self.save_roast(provider_label, &roast, created_at, from_demo));
+        match saved {
+            Ok(saved) => FinishedRoast {
+                roast: saved,
+                not_saved: None,
+            },
+            Err(e) => FinishedRoast {
+                roast: StoredRoast {
+                    id: 0,
+                    created_at,
+                    provider_label: provider_label.to_owned(),
+                    roast,
+                },
+                not_saved: Some(format!(
+                    "This Roast was not saved, so it will be gone when you close Rostery. {e}"
+                )),
+            },
+        }
     }
 
     /// Only a finished Roast gets here, so a failed run can never replace the one before it.
@@ -935,6 +970,58 @@ mod tests {
             .save_roast("Claude Code", &a_roast("Made Up"), 1000, true)
             .unwrap();
         store.delete_demo().unwrap();
+        assert_eq!(store.latest_roast().unwrap(), None);
+    }
+
+    /// Another connection holds the one write lock SQLite has, as an import does.
+    #[test]
+    fn a_finished_roast_outlasts_a_busy_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rostery.db");
+        let store = Store::open(&path).unwrap();
+        let other = Store::open(&path).unwrap();
+        other.conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let releasing = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            other.conn.execute_batch("COMMIT").unwrap();
+        });
+        let roast = a_roast("Waited For");
+
+        let finished =
+            store.keep_roast("Codex", roast.clone(), 1000, false, Duration::from_secs(20));
+        releasing.join().unwrap();
+
+        assert_eq!(finished.not_saved, None);
+        assert!(finished.roast.id > 0);
+        assert_eq!(store.latest_roast().unwrap().unwrap().roast, roast);
+    }
+
+    #[test]
+    fn a_roast_that_cannot_be_saved_is_still_there_to_read_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rostery.db");
+        let store = Store::open(&path).unwrap();
+        let other = Store::open(&path).unwrap();
+        other.conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let roast = a_roast("Never Kept");
+
+        let started = std::time::Instant::now();
+        let finished = store.keep_roast(
+            "Codex",
+            roast.clone(),
+            1000,
+            false,
+            Duration::from_millis(50),
+        );
+
+        // Well under the usual 5 seconds, so it is this wait that counts, however long it is told to be.
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert_eq!(finished.roast.roast, roast);
+        assert_eq!(finished.roast.provider_label, "Codex");
+        assert_eq!(finished.roast.created_at, 1000);
+        let note = finished.not_saved.unwrap();
+        assert!(note.contains("not saved"), "{note}");
+        assert!(note.contains("Close any other copy"), "{note}");
         assert_eq!(store.latest_roast().unwrap(), None);
     }
 

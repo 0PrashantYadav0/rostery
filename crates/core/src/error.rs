@@ -19,6 +19,9 @@ pub enum Error {
     /// A Provider or a Roast went wrong. The message already says what to do next.
     #[error("{0}")]
     Provider(String),
+    /// Settings that cannot be kept as they are. The message already says what to do next.
+    #[error("{0}")]
+    Settings(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

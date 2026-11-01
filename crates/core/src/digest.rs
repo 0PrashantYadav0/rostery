@@ -103,6 +103,14 @@ impl Digest {
     pub fn is_empty(&self) -> bool {
         self.spotify.is_none() && self.youtube.is_none()
     }
+
+    /// The document a Provider gets, laid out for a person to read. Nothing when there is no history.
+    pub fn preview(&self) -> Result<Option<String>> {
+        if self.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(serde_json::to_string_pretty(self)?))
+    }
 }
 
 /// Code points that show nothing, or that change how the text around them reads. The last range is
@@ -1023,6 +1031,7 @@ mod tests {
     fn no_history_is_an_empty_digest() {
         let d = digest(&[]);
         assert!(d.is_empty());
+        assert_eq!(d.preview().unwrap(), None);
         assert_eq!(d.today, "2027-01-15");
     }
 

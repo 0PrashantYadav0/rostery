@@ -201,6 +201,22 @@ fn claude_child_has_no_api_key() {
     );
 }
 
+/// So a launch from a Claude Code terminal behaves like any other, where `claude` would refuse to run
+/// inside itself.
+#[test]
+fn claude_child_does_not_know_it_was_started_from_claude_code() {
+    let fake = Fake::new(OK);
+    std::env::set_var("CLAUDECODE", "1");
+    std::env::set_var("CLAUDE_CODE_ENTRYPOINT", "cli");
+    let reply = fake.ask(LONG_ENOUGH);
+    std::env::remove_var("CLAUDECODE");
+    std::env::remove_var("CLAUDE_CODE_ENTRYPOINT");
+    reply.unwrap();
+    let env = fake.recorded("env");
+    assert!(!env.contains("CLAUDECODE="), "{env}");
+    assert!(!env.contains("CLAUDE_CODE_ENTRYPOINT="), "{env}");
+}
+
 #[test]
 fn claude_result_is_parsed() {
     let fake = Fake::new(OK);
@@ -248,6 +264,50 @@ fn logged_out_with_verbose_on_says_how_to_log_in() {
     let message = fake.ask(LONG_ENOUGH).unwrap_err().to_string();
     assert!(message.contains("not logged in"), "{message}");
     assert!(message.contains("/login"), "{message}");
+}
+
+#[test]
+fn an_error_that_only_looks_like_a_login_problem_is_not_called_one() {
+    for words in [
+        "could not read the plugin catalog in /tmp",
+        "dialog in the way",
+        "failed to log information",
+    ] {
+        let fake = Fake::new(&format!("echo '{words}' >&2; exit 2"));
+        let message = fake.ask(LONG_ENOUGH).unwrap_err().to_string();
+        assert!(message.contains(words), "{message}");
+        assert!(!message.contains("not logged in"), "{message}");
+    }
+}
+
+#[test]
+fn a_cli_too_old_for_these_flags_says_to_update() {
+    let fake = Fake::new("echo \"error: unknown option '--tools'\" >&2; exit 1");
+    let message = fake.ask(LONG_ENOUGH).unwrap_err().to_string();
+    assert!(message.contains("too old"), "{message}");
+    assert!(message.contains("claude update"), "{message}");
+}
+
+/// The screen shows these as plain text, so a backtick would show as a backtick.
+#[test]
+fn no_message_has_backticks() {
+    for body in [
+        "exit 3",
+        "echo 'broken' >&2; exit 3",
+        "echo 'Not logged in' >&2; exit 1",
+        "echo \"error: unknown option '--tools'\" >&2; exit 1",
+        "echo 'not json'",
+        "kill -9 $$",
+        "sleep 60",
+    ] {
+        let fake = Fake::new(body);
+        let message = fake.ask(Duration::from_secs(1)).unwrap_err().to_string();
+        assert!(!message.contains('`'), "{message}");
+    }
+    let fake = Fake::new(OK);
+    std::env::set_var("ROSTERY_CLAUDE_BIN", fake.dir.path().join("not-here"));
+    let message = fake.ask(LONG_ENOUGH).unwrap_err().to_string();
+    assert!(!message.contains('`'), "{message}");
 }
 
 #[test]
