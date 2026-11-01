@@ -1,5 +1,6 @@
-//! The Digest: all a Provider gets to read about a person's history. It holds counts and names,
-//! never URLs, IDs or raw Plays, and every string from history in it comes through `sanitize`.
+//! The Digest: all a Provider gets to read about a person's history. It holds counts, song and video
+//! titles, Creator names, Interests and dates, never URLs, IDs or raw Plays, and every string from
+//! history in it comes through `sanitize`.
 
 use crate::error::Result;
 use crate::model::{InterestMap, Play, Source};
@@ -105,34 +106,76 @@ impl Digest {
 }
 
 /// Code points that show nothing, or that change how the text around them reads. The last range is
-/// the invisible tag characters, which can carry a whole prompt past a person reading the screen.
-/// U+200C and U+200D stay, because Persian words and emoji need them.
+/// the invisible tag characters, which can carry a whole prompt past a person reading the screen. That
+/// also takes the England, Scotland and Wales flags down to a plain black one, which is fine.
+/// U+200C, U+200D and U+FE0F stay, because Persian words and emoji need them.
 pub(crate) fn is_hidden(c: char) -> bool {
     matches!(c,
-        '\u{200b}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}'
-        | '\u{2066}'..='\u{2069}' | '\u{feff}' | '\u{e0000}'..='\u{e0fff}')
+        '\u{ad}' | '\u{34f}' | '\u{61c}' | '\u{180e}' | '\u{200b}' | '\u{200e}' | '\u{200f}'
+        | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206f}'
+        | '\u{3164}' | '\u{fe00}'..='\u{fe0e}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}'
+        | '\u{e0000}'..='\u{e0fff}')
         || (c.is_control() && !c.is_whitespace())
 }
 
+/// In a word, any of these means a link or an ID.
+const LINK_MARKS: [&str; 12] = [
+    "://",
+    "http:/",
+    "https:/",
+    "watch?v=",
+    "youtu.be/",
+    "spotify:track:",
+    "spotify:artist:",
+    "spotify:album:",
+    "spotify:playlist:",
+    "spotify:episode:",
+    "spotify:show:",
+    "spotify:user:",
+];
+/// Endings that make `word.ending/path` a site, in lower case and compared as written, so
+/// `bit.ly/abc` is a link and `ASP.NET/C#`, `Node.js/Express` and `Mr.Children/HANABI` are not.
+// ponytail: `EVIL.COM/X` with no scheme stays, because capitals are all that tell it from ASP.NET/C#.
+const LINK_ENDINGS: [&str; 12] = [
+    "com", "net", "org", "io", "co", "ly", "tv", "gg", "app", "dev", "ai", "xyz",
+];
+
 fn is_link(word: &str) -> bool {
-    let word = word.to_lowercase();
     let word = word.trim_start_matches(|c: char| !c.is_alphanumeric());
-    if ["://", "watch?v=", "youtu.be/"]
-        .iter()
-        .any(|m| word.contains(m))
-        || ["www.", "spotify:"].iter().any(|p| {
-            word.strip_prefix(p)
-                .is_some_and(|rest| rest.starts_with(char::is_alphanumeric))
-        })
-    {
+    let lower = word.to_lowercase();
+    if LINK_MARKS.iter().any(|mark| lower.contains(mark)) {
         return true;
     }
-    // A site with a path, such as bit.ly/abc. AC/DC and 1.5/10 are not.
-    word.split_once('/')
-        .and_then(|(host, _)| host.rsplit_once('.'))
-        .is_some_and(|(name, end)| {
-            !name.is_empty() && end.len() >= 2 && end.chars().all(|c| c.is_ascii_alphabetic())
-        })
+    // After a glued `see:` as well, but not the end of `Awww.`.
+    let www = lower.match_indices("www.").any(|(at, mark)| {
+        !lower[..at].ends_with(char::is_alphanumeric)
+            && lower[at + mark.len()..].starts_with(char::is_alphanumeric)
+    });
+    if www {
+        return true;
+    }
+    let Some(at) = word.find(['/', '?', ':']) else {
+        return false;
+    };
+    let (host, rest) = word.split_at(at);
+    let parts = || host.split('.');
+    if rest.len() > 1 && parts().count() == 4 && parts().all(|part| part.parse::<u8>().is_ok()) {
+        return true;
+    }
+    // Not 1.5/10, whose last part is no word, and not Mr. Big: with no dot in the way.
+    let Some((name, end)) = host.rsplit_once('.') else {
+        return false;
+    };
+    if name.is_empty() || end.len() < 2 || !end.chars().all(|c| c.is_ascii_alphabetic()) {
+        return false;
+    }
+    match rest.split_at(1) {
+        ("?", query) => query.contains('='),
+        (":", port) => port
+            .split_once('/')
+            .is_some_and(|(digits, _)| digits.chars().all(|c| c.is_ascii_digit())),
+        _ => LINK_ENDINGS.contains(&end),
+    }
 }
 
 /// The one door for text from history. Text in a file was written by strangers, so it loses hidden
@@ -628,6 +671,21 @@ mod tests {
             "eviltxt.exe"
         );
         assert_eq!(sanitize("hidden\u{e0041}\u{e0042}"), "hidden");
+        // Marks that show nothing or change how the text around them reads, one from each kind.
+        for hidden in [
+            '\u{ad}', '\u{34f}', '\u{61c}', '\u{180e}', '\u{206a}', '\u{206f}', '\u{3164}',
+            '\u{fe00}', '\u{fe0e}', '\u{fff9}', '\u{fffb}',
+        ] {
+            assert_eq!(
+                sanitize(&format!("a{hidden}b")),
+                "ab",
+                "U+{:04X}",
+                hidden as u32
+            );
+        }
+        // Emoji need these two, so they stay.
+        assert_eq!(sanitize("❤\u{fe0f}"), "❤\u{fe0f}");
+        assert_eq!(sanitize("👩\u{200d}🚀"), "👩\u{200d}🚀");
         // Real writing and emoji stay whole.
         assert_eq!(sanitize("مرحبا 日本語 👩‍🚀"), "مرحبا 日本語 👩‍🚀");
 
@@ -650,8 +708,32 @@ mod tests {
         assert_eq!(sanitize("spotify:track:4uLU6hMCjMI75M1A2tKUQC"), "");
         assert_eq!(sanitize("youtube.com/watch?v=abcdefghijk"), "");
         // Not links.
-        let fine = "AC/DC vs. Mr. Big: HTTP/2 and the 1.5/10 review";
+        let fine = "AC/DC vs. Mr. Big: HTTP/2 and the 1.5/10 review of 1.2.3.4: notes";
         assert_eq!(sanitize(fine), fine);
+    }
+
+    /// Each row is a word in a title, and whether a link or ID in it has to go.
+    #[test]
+    fn links_and_ids_go_and_real_titles_stay_whole() {
+        for (title, is_link) in [
+            ("[link](spotify:track:4uLU6hMCjMI75M1A2tKUQC)", true),
+            ("see:spotify:track:4uLU6hMCjMI75M1A2tKUQC", true),
+            ("see:www.evil.example", true),
+            ("x=spotify:track:4uLU6hMCjMI75M1A2tKUQC", true),
+            ("evil.example:8080/x", true),
+            ("203.0.113.7/admin", true),
+            ("evil.example?id=1", true),
+            ("https:/evil.example", true),
+            ("youtube.com?v=abcdefghijk", true),
+            ("Mr.Children/HANABI", false),
+            ("Build an API with Node.js/Express", false),
+            ("ASP.NET/C# crash course", false),
+            ("Dr.Dre/Eminem megamix", false),
+            ("Spotify:Wrapped 2023 reaction", false),
+        ] {
+            let expected = if is_link { "" } else { title };
+            assert_eq!(sanitize(title), expected, "{title}");
+        }
     }
 
     #[test]
