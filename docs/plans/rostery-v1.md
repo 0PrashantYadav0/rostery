@@ -452,7 +452,7 @@ pub fn export::render_site(template: &[SiteFile], payload: &SharePayload) -> Res
 pub fn export::write_site(files: &[SiteFile], dir: &Path) -> Result<()>;   // dir is owned by Rostery; replaces contents
 ```
 
-`include_roast` defaults to false because a Roast is free text. `prompts/roast.md` has every Burn quote a name from the Digest, and the Digest holds top Items and Creators for both Sources, so `include_item_titles` and `include_youtube` cannot filter what it says. Including it is always the person's own choice.
+`include_roast` defaults to true because sharing the Roast is the point of a Share Site. A Roast is free text: `prompts/roast.md` has every Burn quote a name from the Digest, and the Digest holds top Items and Creators for both Sources, so `include_item_titles` and `include_youtube` cannot filter what it says. The Share screen says so beside the choice, and the person can turn it off.
 
 Commands `export_site(opts) -> ExportResult { dir: String, bytes: u64 }`, `open_site_preview()`, `reveal_site()`. `src-tauri` embeds `dist/share` with `include_dir!`. `web/share/index.html` has the markers `__ROSTERY_DATA__`, `__ROSTERY_TITLE__`, `__ROSTERY_DESC__`. Output from the Vite share build is exactly `index.html`, `assets/share.js`, `assets/share.css`, using a classic deferred script with no `type=module` so it runs from `file://`. Script `pnpm build` builds both. A meta CSP: `default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'`, plus `<meta name="robots" content="noindex">`.
 
