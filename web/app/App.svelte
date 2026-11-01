@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Roast from './screens/Roast.svelte';
   import Sources from './screens/Sources.svelte';
   import Universe from './screens/Universe.svelte';
 
@@ -6,7 +7,7 @@
   const rail = [
     { label: 'Sources', ready: true },
     { label: 'Universe', ready: true },
-    { label: 'Roast', ready: false },
+    { label: 'Roast', ready: true },
     { label: 'Share', ready: false },
     { label: 'Settings', ready: false },
   ];
@@ -55,6 +56,8 @@
     />
     {#if screen === 'Universe'}
       <Universe {importing} {missedError} {stored} />
+    {:else if screen === 'Roast'}
+      <Roast {stored} onsources={() => open('Sources')} />
     {/if}
   </main>
 </div>

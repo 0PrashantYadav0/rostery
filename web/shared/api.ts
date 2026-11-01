@@ -1,9 +1,10 @@
 // One typed function per Tauri command in src-tauri/src/commands.rs.
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebview, type DragDropEvent } from '@tauri-apps/api/webview';
 import { open } from '@tauri-apps/plugin-dialog';
 import { openUrl } from '@tauri-apps/plugin-opener';
-import type { ImportSummary, Totals, Universe, UniverseFilter } from './types';
+import type { Digest, ImportSummary, StoredRoast, Totals, Universe, UniverseFilter } from './types';
 
 export const totals = () => invoke<Totals>('totals');
 export const loadDemo = () => invoke<Totals>('load_demo');
@@ -11,6 +12,13 @@ export const clearDemo = () => invoke<Totals>('clear_demo');
 export const hasDemoData = () => invoke<boolean>('has_demo_data');
 export const importPaths = (paths: string[]) => invoke<ImportSummary>('import_paths', { paths });
 export const getUniverse = (filter: UniverseFilter) => invoke<Universe>('get_universe', { filter });
+export const generateRoast = () => invoke<StoredRoast>('generate_roast');
+export const latestRoast = () => invoke<StoredRoast | null>('latest_roast');
+export const digestPreview = () => invoke<Digest>('digest_preview');
+
+/** A short phrase each time a running Roast has something new to say. */
+export const onRoastProgress = (handler: (phrase: string) => void) =>
+  listen<string>('roast-progress', (event) => handler(event.payload));
 
 /** Opens a link back to a Source in the system browser. The capability only allows those two hosts. */
 export const openSourceLink = (url: string) => openUrl(url);

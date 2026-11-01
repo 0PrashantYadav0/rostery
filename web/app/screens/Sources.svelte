@@ -13,6 +13,7 @@
   } from '../../shared/api';
   import { describeImport } from '../../shared/summary';
   import type { Totals } from '../../shared/types';
+  import Dial from '../Dial.svelte';
 
   let {
     active,
@@ -163,11 +164,11 @@
     <p>Your Spotify and YouTube history, stored on this computer.</p>
   </header>
 
-  <!-- Above the dials, because they are what this button changes, and they have to be on screen when it does. -->
+  <!-- Above the dials, because they are what this button changes, and they have to be on screen when it does. A WebKit webview skips a button on Tab without a tabindex. -->
   <div class="actions">
-    <button class:primary={loaded && all === 0} bind:this={tryDemo} onclick={() => run(loadDemo)} aria-disabled={busy}>Try demo data</button>
+    <button class:primary={loaded && all === 0} tabindex="0" bind:this={tryDemo} onclick={() => run(loadDemo)} aria-disabled={busy}>Try demo data</button>
     {#if hasDemo}
-      <button onclick={clearDemoData} aria-disabled={busy}>Clear demo data</button>
+      <button tabindex="0" onclick={clearDemoData} aria-disabled={busy}>Clear demo data</button>
     {/if}
     {#if loaded && all === 0}
       <p>Nothing here yet. Demo data is made-up history, so you can look around first.</p>
@@ -177,34 +178,7 @@
   <div class="dials">
     {#each dials as { key, name, t, share }}
       <section class={key} aria-labelledby="{key}-name">
-        <div class="dial">
-          <svg viewBox="0 0 200 200" aria-hidden="true">
-            {#each { length: 60 } as _, i}
-              <line
-                x1="100"
-                y1={i % 5 === 0 ? 6 : 10}
-                x2="100"
-                y2="15"
-                transform="rotate({i * 6} 100 100)"
-                class:major={i % 5 === 0}
-              />
-            {/each}
-            <circle class="track" cx="100" cy="100" r="76" />
-            <circle
-              class="arc"
-              cx="100"
-              cy="100"
-              r="76"
-              pathLength="100"
-              stroke-dasharray="{share} 100"
-              transform="rotate(-90 100 100)"
-            />
-          </svg>
-          <p class="reading">
-            <span class="num">{count(t.plays)}</span>
-            <span>plays</span>
-          </p>
-        </div>
+        <Dial {share} value={count(t.plays)} unit="plays" />
         <h2 id="{key}-name">{name}</h2>
         <dl>
           {#if t.minutes > 0}
@@ -224,8 +198,8 @@
       <p>Drop the zip, a JSON file or a folder from Spotify or Google Takeout here.</p>
       <div class="picks">
         <!-- aria-disabled, because a disabled button drops keyboard focus to the page. Each handler checks busy. -->
-        <button class="primary" onclick={() => choose(chooseExport)} aria-disabled={busy}>Choose file</button>
-        <button onclick={() => choose(chooseFolder)} aria-disabled={busy}>Choose folder</button>
+        <button class="primary" tabindex="0" onclick={() => choose(chooseExport)} aria-disabled={busy}>Choose file</button>
+        <button tabindex="0" onclick={() => choose(chooseFolder)} aria-disabled={busy}>Choose folder</button>
       </div>
       <!-- Always mounted: a screen reader only announces a live region that was there before its text changed. -->
       <p role="status" class:result={!importing}>{status}</p>
@@ -296,60 +270,6 @@
 
   .youtube {
     --ink: var(--sky);
-  }
-
-  .dial {
-    position: relative;
-    width: 220px;
-    margin: 0 auto;
-  }
-
-  svg {
-    display: block;
-    width: 100%;
-  }
-
-  line {
-    stroke: var(--rule);
-    stroke-width: 1;
-  }
-
-  line.major {
-    stroke: var(--faint);
-    stroke-width: 1.5;
-  }
-
-  circle {
-    fill: none;
-    stroke-width: 7;
-  }
-
-  .track {
-    stroke: var(--rule);
-  }
-
-  .arc {
-    stroke: var(--ink);
-    transition: stroke-dasharray 0.9s cubic-bezier(0.2, 0.7, 0.2, 1);
-  }
-
-  .reading {
-    position: absolute;
-    inset: 0;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    margin: 0;
-    color: var(--dim);
-    font-size: 13px;
-    line-height: 1.2;
-  }
-
-  .num {
-    color: var(--ivory);
-    font: 500 40px/1.1 var(--serif);
-    font-variant-numeric: tabular-nums;
   }
 
   h2 {
@@ -534,7 +454,6 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .arc,
     .drop {
       transition: none;
     }

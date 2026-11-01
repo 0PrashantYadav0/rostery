@@ -1,4 +1,4 @@
-// Mirrors the Rust structs in crates/core/src/model.rs and universe/mod.rs, in camelCase.
+// Mirrors the Rust structs in crates/core/src/{model,digest,roast}.rs and universe/mod.rs, in camelCase.
 
 export type Source = 'spotify' | 'youtube';
 export type Origin = 'export' | 'api' | 'demo';
@@ -70,4 +70,94 @@ export interface Universe {
   planets: Planet[];
   links: Link[];
   galaxies: Galaxy[];
+}
+
+export interface BiggestDay {
+  date: string;
+  plays: number;
+  minutes: number;
+}
+
+export interface Repeat {
+  item: string;
+  creator: string;
+  times: number;
+  date: string;
+}
+
+export interface CreatorStat {
+  name: string;
+  minutes: number;
+  plays: number;
+  interests: string[];
+}
+
+export interface ItemStat {
+  title: string;
+  creator: string;
+  plays: number;
+}
+
+export interface SourceDigest {
+  plays: number;
+  minutes: number;
+  minutesAreEstimates: boolean;
+  creators: number;
+  items: number;
+  firstDay: string;
+  lastDay: string;
+  skipRatePercent: number;
+  lateNightPercent: number;
+  deletedVideos: number;
+  biggestDay: BiggestDay | null;
+  longestRepeat: Repeat | null;
+  topCreators: CreatorStat[];
+  topItems: ItemStat[];
+}
+
+export interface GalaxyDigest {
+  id: number;
+  name: string;
+  size: number;
+  members: string[];
+}
+
+export interface Digest {
+  today: string;
+  spotify: SourceDigest | null;
+  youtube: SourceDigest | null;
+  galaxies: GalaxyDigest[];
+}
+
+export interface Burn {
+  title: string;
+  body: string;
+}
+
+export interface Verdict {
+  archetype: string;
+  /** Out of 100. */
+  score: number;
+  sentence: string;
+  evidence: string[];
+}
+
+export interface GalaxyName {
+  id: number;
+  name: string;
+}
+
+export interface Roast {
+  headline: string;
+  opening: string;
+  burns: Burn[];
+  verdict: Verdict;
+  galaxyNames: GalaxyName[];
+}
+
+export interface StoredRoast {
+  id: number;
+  createdAt: number;
+  providerLabel: string;
+  roast: Roast;
 }
