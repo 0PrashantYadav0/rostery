@@ -2639,6 +2639,31 @@ test('the dial moves while a Roast runs and when a Verdict lands, unless motion 
   await expect(reading).toHaveCSS('animation-name', 'none');
 });
 
+test('every screen opens at its top, wherever the last one was scrolled to', async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 500 });
+  await installMockIpc(page, { ...withHistory, latest_roast: () => aRoast });
+  await openRoast(page);
+  await expect(page.getByRole('region', { name: 'Verdict' })).toBeVisible();
+  const main = page.locator('main');
+  const scrollTo = (y: number) => main.evaluate((el, y) => (el.scrollTop = y), y);
+  const scrolled = () => main.evaluate((el) => el.scrollTop);
+
+  // Read a Roast to the end, then move on.
+  await scrollTo(100_000);
+  expect(await scrolled()).toBeGreaterThan(0);
+  await page.getByRole('button', { name: 'Sources', exact: true }).click();
+  await expect(page.getByRole('heading', { level: 1, name: 'Sources' })).toBeInViewport();
+  expect(await scrolled()).toBe(0);
+
+  // And the other way, to a screen seen before.
+  await scrollTo(300);
+  expect(await scrolled()).toBeGreaterThan(0);
+  await page.getByRole('button', { name: 'Roast', exact: true }).click();
+  await expect(page.getByRole('heading', { level: 1, name: 'Roast' })).toBeInViewport();
+  await expect(roastButton(page)).toBeInViewport();
+  expect(await scrolled()).toBe(0);
+});
+
 /** The name of everything Tab lands on, the way a WebKit webview really moves. */
 async function reachedByTab(page: Page, presses: number) {
   const reached = new Set<string>();

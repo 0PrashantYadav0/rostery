@@ -17,11 +17,14 @@
   // Goes up each time Sources finishes changing what is stored, so the Universe draws it again.
   let stored = $state(0);
   let missedError = $state('');
+  let scroller = $state<HTMLElement>();
 
   function open(label: string) {
     screen = label;
     // Sources shows it too, so it stops following the person once they can go and read it there.
     missedError = '';
+    // Every screen shares one scroller, so the next one would otherwise open at this one's offset.
+    if (scroller) scroller.scrollTop = 0;
   }
 </script>
 
@@ -45,7 +48,7 @@
       {/each}
     </ul>
   </nav>
-  <main>
+  <main bind:this={scroller}>
     <!-- Sources stays mounted, so an import keeps its place and its result while you look elsewhere. -->
     <Sources
       active={screen === 'Sources'}
