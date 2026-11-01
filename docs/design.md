@@ -156,7 +156,7 @@ A second, cheaper prompt in `prompts/interests.md` asks for up to 3 Interests pe
 
 Output is `index.html`, `assets/share.js`, `assets/share.css` and `.nojekyll`, all with relative paths. It opens from `file://`, from a GitHub Pages subpath and from a Vercel root.
 
-The payload goes inline in `<script type="application/json">` with `<`, `>`, `&`, U+2028 and U+2029 escaped. The user chooses a display name and whether to include the Roast, each Universe, and Item titles. Item titles are off by default because a video title can reveal far more than a channel name. The site always carries Source attribution, and its Planet links go back to the Source.
+The payload goes inline in `<script type="application/json">` with `<`, `>`, `&`, U+2028 and U+2029 escaped. The user chooses a display name and whether to include the Roast, each Universe, and Item titles. Item titles are off by default because a video title can reveal far more than a channel name. The Roast is off by default too. It is free text that quotes Item titles and names from both Sources, so turning off Item titles or leaving out a Universe does not change its words, and nothing can filter it afterwards. The Share screen says so beside the choice. The site always carries Source attribution, and its Planet links go back to the Source.
 
 The folder is always `<app data>/site`. Rostery owns it and rewrites it on every export, so it can never delete a folder the user pointed it at.
 

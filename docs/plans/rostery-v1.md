@@ -443,7 +443,7 @@ Ticket 09. Blocked by Tasks 5 and 8.
 ```rust
 pub struct ExportOptions { pub display_name: String, pub include_roast: bool,
                            pub include_spotify: bool, pub include_youtube: bool,
-                           pub include_item_titles: bool }   // Default: "Anonymous", true, true, true, false
+                           pub include_item_titles: bool }   // Default: "Anonymous", false, true, true, false
 pub struct SharePayload { pub display_name: String, pub generated_at: i64, pub roast: Option<Roast>,
                           pub universes: BTreeMap<UniverseFilter, Universe>, pub attribution: Vec<String> }
 pub struct SiteFile { pub path: String, pub bytes: Vec<u8> }
@@ -452,6 +452,8 @@ pub fn export::render_site(template: &[SiteFile], payload: &SharePayload) -> Res
 pub fn export::write_site(files: &[SiteFile], dir: &Path) -> Result<()>;   // dir is owned by Rostery; replaces contents
 ```
 
+`include_roast` defaults to false because a Roast is free text. `prompts/roast.md` has every Burn quote a name from the Digest, and the Digest holds top Items and Creators for both Sources, so `include_item_titles` and `include_youtube` cannot filter what it says. Including it is always the person's own choice.
+
 Commands `export_site(opts) -> ExportResult { dir: String, bytes: u64 }`, `open_site_preview()`, `reveal_site()`. `src-tauri` embeds `dist/share` with `include_dir!`. `web/share/index.html` has the markers `__ROSTERY_DATA__`, `__ROSTERY_TITLE__`, `__ROSTERY_DESC__`. Output from the Vite share build is exactly `index.html`, `assets/share.js`, `assets/share.css`, using a classic deferred script with no `type=module` so it runs from `file://`. Script `pnpm build` builds both. A meta CSP: `default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'`, plus `<meta name="robots" content="noindex">`.
 
 - [ ] **Step 1: Write failing Rust tests in `export.rs`**
@@ -459,9 +461,11 @@ Commands `export_site(opts) -> ExportResult { dir: String, bytes: u64 }`, `open_
 - `escapes_script_breakout`: a Creator named `</script><img src=x onerror=alert(1)>` leaves no `</script><img` in `index.html`, and the JSON parses back equal.
 - `title_is_html_escaped`: a Roast headline with `"><script>` is escaped in `<title>` and `og:` tags.
 - `line_separators_escaped`: U+2028 and U+2029 are escaped.
-- `excluded_source_is_absent`: `include_youtube: false` means a sentinel channel name appears in no file.
+- `excluded_source_is_absent`: `include_youtube: false` means a sentinel channel name appears in no file, with a stored Roast that quotes it and the default options.
 - `excluded_roast_is_absent`.
-- `item_titles_off_by_default`: a sentinel Item title appears in no file, and appears when the option is on.
+- `roast_is_off_by_default`: `ExportOptions::default()` gives a payload with no Roast, though one is stored.
+- `item_titles_off_by_default`: a sentinel Item title appears in no file, with a stored Roast that quotes it and the default options, and appears when the option is on.
+- `included_roast_keeps_its_words`: `include_roast: true` with `include_youtube: false` and `include_item_titles: false` keeps a stored Roast's quoted title and channel. This is why the Share screen has to warn, so a change here has to change that warning too.
 - `no_secrets_in_site`: a sentinel in the settings table appears in no file.
 - `paths_are_relative`: `index.html` has no `="/` or `http` asset reference.
 - `site_files_are_exact`: `index.html`, `assets/share.js`, `assets/share.css`, `.nojekyll`.
@@ -476,11 +480,13 @@ A single scrolling page: Roast headline, opening, Burns, Verdict as a shareable 
 
 - [ ] **Step 4: Write `demo_site.rs` and `e2e/share.spec.ts`**
 
-`cargo run -p rostery-core --example demo_site -- dist/share dist/demo-site [--hostile]` builds a site from demo data and a canned Roast. e2e, against both `file://` and an HTTP server under `/some/subpath/`: `roast and verdict show`; `universe tabs work`; `no third party requests` (every request is same-origin or file); `hostile payload stays inert` (with `--hostile`, no dialog fires, no injected `img`); `phone width has no sideways scroll`; `falls back to list without webgl`; `share js under budget` (gzip size under 350 KB).
+`cargo run -p rostery-core --example demo_site -- dist/share dist/demo-site [--hostile]` builds a site from demo data and a canned Roast, with `include_roast: true`. e2e, against both `file://` and an HTTP server under `/some/subpath/`: `roast and verdict show`; `universe tabs work`; `no third party requests` (every request is same-origin or file); `hostile payload stays inert` (with `--hostile`, no dialog fires, no injected `img`); `phone width has no sideways scroll`; `falls back to list without webgl`; `share js under budget` (gzip size under 350 KB).
 
 - [ ] **Step 5: Build the app's Share screen**
 
 Options, a live list of exactly what will be included, Export, Preview in browser, and Reveal folder. Deploy buttons come next.
+
+The Roast option starts unticked. Beside it, always: "Your Roast quotes song and video titles and names from all your history, and the other choices here do not change its words. Read it before you include it." e2e: `including the roast is an explicit choice` (an export with nothing touched has no Roast, and the warning is on screen before the box can be ticked).
 
 - [ ] **Step 6: Run all checks and commit**
 
