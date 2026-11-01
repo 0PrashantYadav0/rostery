@@ -1,6 +1,6 @@
 mod commands;
 
-use tauri::{plugin, Manager, Runtime, Url};
+use tauri::{plugin, Manager, RunEvent, Runtime, Url};
 
 /// The app's own pages. Everything else opens in the system browser, so nothing can take the window
 /// somewhere there is no way back from, such as "Open Link" on a link's context menu.
@@ -28,6 +28,7 @@ fn main() {
             let dir = app.path().app_data_dir()?;
             app.manage(commands::AppState {
                 db_path: dir.join("rostery.db"),
+                roast_running: Default::default(),
             });
             Ok(())
         })
@@ -37,10 +38,20 @@ fn main() {
             commands::clear_demo,
             commands::has_demo_data,
             commands::import_paths,
-            commands::get_universe
+            commands::get_universe,
+            commands::generate_roast,
+            commands::latest_roast,
+            commands::digest_preview
         ])
-        .run(tauri::generate_context!())
-        .expect("Rostery could not start");
+        .build(tauri::generate_context!())
+        .expect("Rostery could not start")
+        .run(|_, event| {
+            // Otherwise a CLI runs on for up to 5 minutes with nobody to read its reply.
+            // ponytail: a crash or SIGKILL skips this, and then the CLI finishes by itself.
+            if let RunEvent::Exit = event {
+                rostery_core::llm::stop_running();
+            }
+        });
 }
 
 #[cfg(test)]
