@@ -11,7 +11,7 @@ The Digest goes over stdin, because argv is visible in `ps`. We remove `ANTHROPI
 
 ## Consequences
 
-We tested this on 2026-11-05 with Claude Code 2.1.310 and codex-cli 0.164.0. Claude's `--json-schema` returns no `structured_output` when `--tools ""` is set, because it works through a tool, so Rostery puts the JSON contract in the prompt and validates the reply. `--bare` is off limits since it skips the keychain read that subscription login needs.
+We tested this on 2026-11-05 with Claude Code 2.1.310 and codex-cli 0.164.0. Claude's `--json-schema` returns no `structured_output` when `--tools ""` is set, because it works through a tool, so Rostery puts the JSON contract in the prompt and validates the reply. `--bare` is off limits since it skips the keychain read that subscription login needs. With `verbose` on in the CLI's global config, `--output-format json` prints an array of events and `--setting-sources ""` does not stop that, so Rostery reads the last `result` event.
 
 Codex in read-only mode can still run read-only shell commands. Its instructions forbid that, but an injected prompt could try. Titles are shortened and stripped before they reach the Digest, and the user previews a Share Site before publishing it.
 

@@ -5,6 +5,7 @@
 use crate::digest::is_hidden;
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -78,7 +79,12 @@ pub struct CompletionRequest {
 
 pub fn complete(p: &Provider, req: &CompletionRequest, timeout: Duration) -> Result<String> {
     match p {
-        Provider::ClaudeCode { model } => claude(model.as_deref(), req, timeout, &child_path()),
+        Provider::ClaudeCode { model } => claude(
+            model.as_deref(),
+            req,
+            timeout,
+            &child_path(login_shell_path()),
+        ),
         Provider::Codex { .. } | Provider::Local { .. } => Err(Error::Provider(format!(
             "{} is not available yet. Rostery can only use Claude Code for now.",
             p.label()
@@ -93,21 +99,33 @@ fn claude(
     path: &str,
 ) -> Result<String> {
     let empty = tempfile::tempdir()?;
-    let mut cmd = Command::new(binary("claude"));
-    cmd.args(["-p", "--output-format", "json", "--system-prompt"])
-        .arg(&req.system)
-        .args(["--tools", ""])
-        .args(["--strict-mcp-config", "--no-session-persistence"])
-        .args(["--setting-sources", ""])
-        .current_dir(empty.path())
-        .env("PATH", path);
-    if let Some(model) = model {
-        cmd.args(["--model", model]);
-    }
-    for key in REMOVED_ENV {
-        cmd.env_remove(key);
-    }
-    match run(&mut cmd, Some(&req.user), timeout) {
+    // A Command of its own each time, because `run` adds a pre_exec that only works once per Command.
+    let attempt = |path: &str| {
+        let mut cmd = Command::new(binary("claude"));
+        cmd.args(["-p", "--output-format", "json", "--system-prompt"])
+            .arg(&req.system)
+            .args(["--tools", ""])
+            .args(["--strict-mcp-config", "--no-session-persistence"])
+            .args(["--setting-sources", ""])
+            .current_dir(empty.path())
+            .env("PATH", path);
+        if let Some(model) = model {
+            cmd.args(["--model", model]);
+        }
+        for key in REMOVED_ENV {
+            cmd.env_remove(key);
+        }
+        run(&mut cmd, Some(&req.user), timeout)
+    };
+    let outcome = match attempt(path) {
+        // The CLI may be newer than the PATH, or the shell may not have answered in time. Telling
+        // someone to install what they have costs far more than asking the shell once more.
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            attempt(&child_path(with_install_dirs(ask_login_shell())))
+        }
+        outcome => outcome,
+    };
+    match outcome {
         Ok(Some(finished)) => claude_reply(&finished),
         Ok(None) => Err(Error::Provider(format!(
             "Claude Code did not finish within {}, so Rostery stopped it. Check that `claude` works \
@@ -116,7 +134,8 @@ fn claude(
         ))),
         Err(e) if e.kind() == ErrorKind::NotFound => Err(Error::Provider(
             "Rostery could not find Claude Code. Install it from claude.com/claude-code, log in once \
-             in a terminal, then try again."
+             in a terminal, then try again. If it is already installed, try again anyway, because \
+             your login shell may have been too slow to say where it is."
                 .to_owned(),
         )),
         Err(e) => Err(Error::Provider(format!(
@@ -143,9 +162,19 @@ struct ClaudeReply {
     result: Option<String>,
 }
 
+/// One object, or with `verbose` on in the CLI's global config every event in an array, which
+/// `--setting-sources` does not stop. The result is the last of those.
+fn parse_claude_reply(stdout: &str) -> Option<ClaudeReply> {
+    let result = match serde_json::from_str(stdout).ok()? {
+        Value::Array(events) => events.into_iter().rev().find(|e| e["type"] == "result")?,
+        single => single,
+    };
+    serde_json::from_value(result).ok()
+}
+
 /// A CLI in trouble can still print its JSON, and the words in that say more than an exit code does.
 fn claude_reply(done: &Finished) -> Result<String> {
-    let reply: Option<ClaudeReply> = serde_json::from_str(done.stdout.trim()).ok();
+    let reply = parse_claude_reply(done.stdout.trim());
     if let Some(ClaudeReply {
         is_error: true,
         result,
@@ -299,27 +328,31 @@ fn read_capped(mut file: &File) -> io::Result<String> {
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// The PATH of the person's login shell, plus any usual install folder that exists. An app launched
-/// from Finder or the Dock has only `/usr/bin:/bin:/usr/sbin:/sbin`, and `claude` is not there.
+static SHELL_ANSWER: OnceLock<String> = OnceLock::new();
+
+/// The PATH of the person's login shell, plus any usual install folder that exists right now. An app
+/// launched from Finder or the Dock has only `/usr/bin:/bin:/usr/sbin:/sbin`, and `claude` is not there.
 pub fn login_shell_path() -> Option<String> {
-    static PATH: OnceLock<Option<String>> = OnceLock::new();
-    PATH.get_or_init(|| {
-        let (shell, home) = (std::env::var_os("SHELL"), std::env::var_os("HOME"));
-        login_path(
-            shell.as_deref(),
-            home.as_deref().map(Path::new),
-            SHELL_TIMEOUT,
-        )
-    })
-    .clone()
+    with_install_dirs(SHELL_ANSWER.get().cloned().or_else(ask_login_shell))
 }
 
-/// `login_shell_path` with what it reads from the environment passed in, so a test needs no change
-/// to this process's environment.
-fn login_path(shell: Option<&OsStr>, home: Option<&Path>, timeout: Duration) -> Option<String> {
-    let from_shell = shell
-        .and_then(|shell| ask_shell(shell, timeout))
-        .unwrap_or_default();
+/// Only an answer gets kept. A shell that was slow or failed gets asked again next time.
+// ponytail: the first answer stays, so a CLI only a newer answer knows costs one failed spawn and one
+// more ask on each Roast. Use a Mutex here if that ever shows.
+fn ask_login_shell() -> Option<String> {
+    let answer = ask_shell(&std::env::var_os("SHELL")?, SHELL_TIMEOUT)?;
+    let _ = SHELL_ANSWER.set(answer.clone());
+    Some(answer)
+}
+
+fn with_install_dirs(from_shell: Option<String>) -> Option<String> {
+    let home = std::env::var_os("HOME");
+    merged_with_install_dirs(from_shell, home.as_deref().map(Path::new))
+}
+
+/// `with_install_dirs` with HOME passed in, so a test needs no change to this process's environment.
+fn merged_with_install_dirs(from_shell: Option<String>, home: Option<&Path>) -> Option<String> {
+    let from_shell = from_shell.unwrap_or_default();
     let in_home = INSTALL_DIRS_IN_HOME
         .iter()
         .filter_map(|dir| home.map(|home| home.join(dir)));
@@ -353,8 +386,8 @@ fn merge_paths<'a>(parts: impl IntoIterator<Item = &'a str>) -> String {
 }
 
 /// What a CLI finds its way with: the login shell's PATH, then whatever this app was given.
-fn child_path() -> String {
-    let login = login_shell_path().unwrap_or_default();
+fn child_path(login: Option<String>) -> String {
+    let login = login.unwrap_or_default();
     let inherited = std::env::var("PATH").unwrap_or_default();
     merge_paths([login.as_str(), inherited.as_str()])
 }
@@ -391,6 +424,12 @@ mod tests {
             ),
         );
         shell
+    }
+
+    /// Asks this shell, with this HOME, and keeps nothing.
+    fn login_path(shell: Option<&OsStr>, home: Option<&Path>, timeout: Duration) -> Option<String> {
+        let from_shell = shell.and_then(|shell| ask_shell(shell, timeout));
+        merged_with_install_dirs(from_shell, home)
     }
 
     fn request() -> CompletionRequest {

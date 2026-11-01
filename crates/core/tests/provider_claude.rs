@@ -228,6 +228,28 @@ fn logged_out_says_how_to_log_in() {
     assert!(message.contains("/login"), "{message}");
 }
 
+/// With `verbose` on in the CLI's global config, `--output-format json` prints every event as an
+/// array, and `--setting-sources` does not stop it. This is the shape CLI 2.1.310 prints.
+const VERBOSE_EVENTS: &str = r#"{"type":"system","subtype":"init","model":"m"},{"type":"assistant","message":{"content":[{"type":"text","text":"not this"}]}}"#;
+
+#[test]
+fn claude_with_verbose_on_is_parsed() {
+    let fake = Fake::new(&format!(
+        r#"printf '[{VERBOSE_EVENTS},{{"type":"result","is_error":false,"result":"hello"}}]'"#
+    ));
+    assert_eq!(fake.ask(LONG_ENOUGH).unwrap(), "hello");
+}
+
+#[test]
+fn logged_out_with_verbose_on_says_how_to_log_in() {
+    let fake = Fake::new(&format!(
+        r#"printf '[{VERBOSE_EVENTS},{{"type":"result","is_error":true,"result":"Not logged in · Please run /login"}}]'; exit 1"#
+    ));
+    let message = fake.ask(LONG_ENOUGH).unwrap_err().to_string();
+    assert!(message.contains("not logged in"), "{message}");
+    assert!(message.contains("/login"), "{message}");
+}
+
 #[test]
 fn nonzero_exit_reports_stderr() {
     let fake = Fake::new("echo 'something broke in here' >&2; exit 3");
@@ -257,6 +279,7 @@ fn a_reply_that_is_not_json_says_what_to_do() {
         "echo 'Welcome to Claude'",
         ":",
         r#"printf '{"type":"result","is_error":false}'"#,
+        r#"printf '[{"type":"system","subtype":"init"}]'"#,
     ] {
         let fake = Fake::new(body);
         let message = fake.ask(LONG_ENOUGH).unwrap_err().to_string();
@@ -335,8 +358,50 @@ fn stop_running_ends_a_cli_when_the_app_quits() {
     assert!(wait_until_gone(&fake.recorded("pid")));
 }
 
-/// Launched from Finder, an app gets a bare PATH. Here the test binary runs itself like that, so the
-/// real `login_shell_path` and its OnceLock start fresh, and only the login shell knows the way.
+/// Runs one `#[ignore]` test below in a process of its own, launched the way Finder launches an app:
+/// a bare PATH, with `home` as HOME. So the real `login_shell_path` and its OnceLock start fresh.
+fn in_a_fresh_process(test: &str, home: &Path, shell: &Path) {
+    let child = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test, "--ignored", "--nocapture"])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .env("HOME", home)
+        .env("SHELL", shell)
+        .env("ROSTERY_TEST_FINDER", "1")
+        .output()
+        .unwrap();
+    let (out, err) = (
+        String::from_utf8_lossy(&child.stdout),
+        String::from_utf8_lossy(&child.stderr),
+    );
+    assert!(child.status.success(), "{out}\n{err}");
+    assert!(out.contains("1 passed"), "{out}");
+}
+
+fn in_the_fresh_process() -> bool {
+    std::env::var_os("ROSTERY_TEST_FINDER").is_some()
+}
+
+/// A name no real CLI has, so these can never reach the real `claude` in one of the usual folders.
+const FAKE_CLAUDE: &str = "rostery-fake-claude";
+
+fn ask_fresh() -> rostery_core::Result<String> {
+    std::env::set_var("ROSTERY_CLAUDE_BIN", FAKE_CLAUDE);
+    llm::complete(
+        &Provider::ClaudeCode { model: None },
+        &CompletionRequest {
+            system: SYSTEM.into(),
+            user: USER.into(),
+            schema: json!({}),
+        },
+        LONG_ENOUGH,
+    )
+}
+
+fn home() -> PathBuf {
+    PathBuf::from(std::env::var_os("HOME").unwrap())
+}
+
 #[test]
 fn a_finder_launch_finds_claude_through_the_login_shell() {
     let _env = ENV.lock().unwrap_or_else(PoisonError::into_inner);
@@ -352,30 +417,13 @@ fn a_finder_launch_finds_claude_through_the_login_shell() {
             bin.display()
         ),
     );
-
-    let child = Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "launched_like_finder",
-            "--ignored",
-            "--nocapture",
-        ])
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-        .env("HOME", dir.path())
-        .env("SHELL", &shell)
-        .env("ROSTERY_TEST_FINDER", "1")
-        .output()
-        .unwrap();
-    let out = String::from_utf8_lossy(&child.stdout);
-    assert!(child.status.success(), "{out}");
-    assert!(out.contains("1 passed"), "{out}");
+    in_a_fresh_process("launched_like_finder", dir.path(), &shell);
 }
 
 #[test]
 #[ignore = "run by a_finder_launch_finds_claude_through_the_login_shell"]
 fn launched_like_finder() {
-    if std::env::var_os("ROSTERY_TEST_FINDER").is_none() {
+    if !in_the_fresh_process() {
         return;
     }
     let path = llm::login_shell_path().unwrap();
@@ -390,6 +438,127 @@ fn launched_like_finder() {
         LONG_ENOUGH,
     );
     assert_eq!(reply.unwrap(), "hello");
+}
+
+/// A shell that knows nothing useful, for a test where the CLI turns up in an install folder.
+fn plain_shell(dir: &Path) -> PathBuf {
+    let shell = dir.join("shell");
+    write_script(&shell, "export PATH=/usr/bin:/bin\neval \"$2\"");
+    shell
+}
+
+/// The app tells the person to install it and try again, so that has to work with the app still open.
+#[test]
+fn claude_installed_after_a_failed_try_is_found_without_a_restart() {
+    let _env = ENV.lock().unwrap_or_else(PoisonError::into_inner);
+    let dir = TempDir::new().unwrap();
+    let shell = plain_shell(dir.path());
+    in_a_fresh_process("installed_after_a_failed_try", dir.path(), &shell);
+}
+
+#[test]
+#[ignore = "run by claude_installed_after_a_failed_try_is_found_without_a_restart"]
+fn installed_after_a_failed_try() {
+    if !in_the_fresh_process() {
+        return;
+    }
+    let message = ask_fresh().unwrap_err().to_string();
+    assert!(message.contains("could not find Claude Code"), "{message}");
+
+    let local = home().join(".local/bin");
+    std::fs::create_dir_all(&local).unwrap();
+    write_script(&local.join(FAKE_CLAUDE), OK);
+
+    assert_eq!(ask_fresh().unwrap(), "hello");
+}
+
+/// The shell gave an answer before the CLI was installed, and only its next answer holds the way there.
+#[test]
+fn claude_only_a_newer_shell_answer_knows_is_found_without_a_restart() {
+    let _env = ENV.lock().unwrap_or_else(PoisonError::into_inner);
+    let dir = TempDir::new().unwrap();
+    let shell = dir.path().join("shell");
+    write_script(
+        &shell,
+        "export PATH=/usr/bin:/bin\n[ -e \"$HOME/rc\" ] && . \"$HOME/rc\"\neval \"$2\"",
+    );
+    in_a_fresh_process("found_through_a_newer_answer", dir.path(), &shell);
+}
+
+#[test]
+#[ignore = "run by claude_only_a_newer_shell_answer_knows_is_found_without_a_restart"]
+fn found_through_a_newer_answer() {
+    if !in_the_fresh_process() {
+        return;
+    }
+    let message = ask_fresh().unwrap_err().to_string();
+    assert!(message.contains("could not find Claude Code"), "{message}");
+
+    let bin = home().join("somewhere-only-the-shell-knows");
+    std::fs::create_dir_all(&bin).unwrap();
+    write_script(&bin.join(FAKE_CLAUDE), OK);
+    let rc = format!("export PATH=\"{}:$PATH\"\n", bin.display());
+    std::fs::write(home().join("rc"), rc).unwrap();
+
+    assert_eq!(ask_fresh().unwrap(), "hello");
+}
+
+/// A shell that is slow or fails on its first go, then answers. Only it knows where the CLI is.
+fn shell_that_stumbles_once(dir: &Path, first_go: &str) -> PathBuf {
+    let bin = dir.join("somewhere-only-the-shell-knows");
+    std::fs::create_dir(&bin).unwrap();
+    write_script(&bin.join(FAKE_CLAUDE), OK);
+    let shell = dir.join("shell");
+    write_script(
+        &shell,
+        &format!(
+            "echo asked >> '{asked}'\n\
+             [ \"$(wc -l < '{asked}')\" -gt 1 ] || {{ {first_go}; }}\n\
+             export PATH='{bin}:/usr/bin:/bin'\n\
+             eval \"$2\"",
+            asked = dir.join("asked").display(),
+            bin = bin.display(),
+        ),
+    );
+    shell
+}
+
+#[test]
+fn a_shell_that_fails_once_is_asked_again() {
+    let _env = ENV.lock().unwrap_or_else(PoisonError::into_inner);
+    let dir = TempDir::new().unwrap();
+    let shell = shell_that_stumbles_once(dir.path(), "exit 1");
+    in_a_fresh_process("stumbling_shell_recovers", dir.path(), &shell);
+}
+
+/// Sits through the real 5 second limit on asking a shell.
+#[test]
+fn a_shell_that_is_too_slow_once_is_asked_again() {
+    let _env = ENV.lock().unwrap_or_else(PoisonError::into_inner);
+    let dir = TempDir::new().unwrap();
+    let shell = shell_that_stumbles_once(dir.path(), "sleep 7");
+    in_a_fresh_process("stumbling_shell_recovers", dir.path(), &shell);
+}
+
+#[test]
+#[ignore = "run by a_shell_that_fails_once_is_asked_again and a_shell_that_is_too_slow_once_is_asked_again"]
+fn stumbling_shell_recovers() {
+    if !in_the_fresh_process() {
+        return;
+    }
+    let asked = || {
+        std::fs::read_to_string(home().join("asked"))
+            .unwrap()
+            .lines()
+            .count()
+    };
+
+    assert_eq!(ask_fresh().unwrap(), "hello");
+    assert_eq!(asked(), 2, "asked again before giving up");
+
+    // An answer is worth keeping, so the next Roast does not ask.
+    assert_eq!(ask_fresh().unwrap(), "hello");
+    assert_eq!(asked(), 2);
 }
 
 /// Costs a little subscription use, so it only runs when asked for.
