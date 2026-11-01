@@ -7,7 +7,7 @@ History contains text written by strangers. A video title can be a prompt inject
 - `claude -p --output-format json --tools "" --strict-mcp-config --no-session-persistence --setting-sources ""`, run in an empty temp directory.
 - `codex exec --sandbox read-only --ephemeral --ignore-rules --ignore-user-config --skip-git-repo-check -C <temp>`, also in an empty temp directory.
 
-The Digest goes over stdin, because argv is visible in `ps`. We remove `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` from the child environment so a stray key cannot switch the user from their subscription to metered billing.
+The Digest goes over stdin, because argv is visible in `ps`. We remove `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `OPENAI_API_KEY` from the child environment so a stray key cannot switch the user from their subscription to metered billing.
 
 ## Consequences
 

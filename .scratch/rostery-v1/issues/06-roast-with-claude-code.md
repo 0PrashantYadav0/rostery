@@ -4,12 +4,12 @@
 
 **Blocked by:** 04
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A Digest holds aggregates and names, never URLs, IDs or raw Plays, and stays under 64 KB
-- [ ] Late-night stats use the user's local time
-- [ ] Claude Code runs with no tools, no settings, no session saved, in an empty folder, with the Digest on stdin and no API key in its environment
-- [ ] The CLI is found when the app is launched from Finder
-- [ ] Logged out, timed out, killed and non-JSON replies each give a useful message and keep the previous Roast
-- [ ] With no history, the app asks for some in place of calling the Provider
-- [ ] The app states that the Digest goes to Anthropic before the call
+- [x] A Digest holds aggregates and names, never URLs, IDs or raw Plays, and stays under 64 KB
+- [x] Late-night stats use the user's local time
+- [x] Claude Code runs with no tools, no settings, no session saved, in an empty folder, with the Digest on stdin and no API key in its environment
+- [x] The CLI is found when the app is launched from Finder
+- [x] Logged out, timed out, killed and non-JSON replies each give a useful message and keep the previous Roast
+- [x] With no history, the app asks for some in place of calling the Provider
+- [x] The app states that the Digest goes to Anthropic before the call

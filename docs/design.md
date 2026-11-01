@@ -145,7 +145,9 @@ A Roast is one JSON document:
 }
 ```
 
-Rostery extracts the first JSON object from the reply, tolerating code fences. It retries once with a reminder on bad JSON, clamps `score` to 0..=100, and fails if `burns` is empty. A failed run never replaces the previous Roast.
+Rostery extracts the first JSON object from the reply that is a Roast, tolerating code fences and prose. It retries once with a reminder on bad JSON, clamps `score` to 0..=100, fails if `burns` is empty, and caps every field and list, with at most 12 Burns, so a Provider cannot blow up the screen or a Share Site. A failed run never replaces the previous Roast.
+
+One Roast runs at a time, which Rust enforces as well as the screen. It belongs to the app and not to the screen, so it survives moving between screens. Quitting the app stops a CLI that is still running.
 
 A second, cheaper prompt in `prompts/interests.md` asks for up to 3 Interests per Creator for the top 80 Creators that do not have any from AI yet. The result is cached. This is what links a lo-fi YouTube channel to a Spotify artist when they never shared a Session. If it fails, the Roast still runs.
 
