@@ -1,4 +1,4 @@
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::model::{Affinity, InterestMap, Origin, Play, Source, SourceTotals, Totals};
 use crate::roast::{Roast, StoredRoast};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -438,7 +438,7 @@ impl Store {
                 id,
                 created_at,
                 provider_label,
-                roast: serde_json::from_str(&json)?,
+                roast: serde_json::from_str(&json).map_err(|_| Error::UnreadableRoast)?,
             })
         })
         .transpose()
@@ -467,7 +467,6 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::Error;
 
     fn play(source: Source, creator: &str, item: &str, played_at: i64) -> Play {
         Play {
@@ -894,6 +893,28 @@ mod tests {
             .save_roast("Claude Code", &a_roast("Next"), 3000, false)
             .unwrap();
         store.delete_demo().unwrap();
+        assert_eq!(store.latest_roast().unwrap(), Some(next));
+    }
+
+    #[test]
+    fn a_stored_roast_that_cannot_be_read_says_so_and_the_next_one_replaces_it() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO roasts (created_at, provider_label, json)
+                 VALUES (1, 'Claude Code', '{\"from\": \"another version\"}')",
+                [],
+            )
+            .unwrap();
+
+        let message = store.latest_roast().unwrap_err().to_string();
+        assert!(message.contains("your last Roast"), "{message}");
+        assert!(!message.contains("setting"), "{message}");
+
+        let next = store
+            .save_roast("Claude Code", &a_roast("Next"), 2000, false)
+            .unwrap();
         assert_eq!(store.latest_roast().unwrap(), Some(next));
     }
 

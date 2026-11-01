@@ -11,6 +11,8 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("Your own history is already here, so Rostery keeps demo data out of it, because a Roast of the two mixed would be wrong. The Universe and Roast screens are ready for what you have.")]
     RealHistoryStored,
+    #[error("Rostery could not read your last Roast. You can write a new one, and it takes the old one's place.")]
+    UnreadableRoast,
     /// A file the user picked. The message already says what to do next.
     #[error("{0}")]
     Import(String),

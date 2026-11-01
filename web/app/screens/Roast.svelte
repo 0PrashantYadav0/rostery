@@ -1,30 +1,60 @@
 <script lang="ts">
+  import { tick, untrack } from 'svelte';
   import { errorMessage, totals } from '../../shared/api';
   import Dial from '../Dial.svelte';
   import { roastRun as run } from '../roast-run.svelte';
 
-  let { stored, onsources }: { stored: number; onsources: () => void } = $props();
+  let {
+    importing,
+    missedError,
+    stored,
+    onsources,
+  }: { importing: boolean; missedError: string; stored: number; onsources: () => void } = $props();
 
   let hasHistory = $state<boolean>();
   let problem = $state('');
+  let ask = $state<HTMLElement>();
 
-  // Runs when this screen opens and each time Sources finishes changing what is stored. The last answer wins.
+  // The two are asked apart, because only history decides the button. A last Roast that cannot be read
+  // must not take away the way to write the one that replaces it. The last answer wins.
   let latest = 0;
+  async function check() {
+    const asked = (latest += 1);
+    await Promise.all([
+      run.load(),
+      totals().then(
+        (t) => {
+          if (asked !== latest) return;
+          hasHistory = t.spotify.plays + t.youtube.plays > 0;
+          problem = '';
+        },
+        (e) => {
+          if (asked === latest) problem = errorMessage(e);
+        },
+      ),
+    ]);
+  }
+
+  // Runs when this screen opens and each time Sources finishes changing what is stored, and for nothing else.
   $effect(() => {
     stored;
-    const asked = (latest += 1);
-    Promise.all([totals(), run.load()])
-      .then(([t]) => {
-        if (asked !== latest) return;
-        hasHistory = t.spotify.plays + t.youtube.plays > 0;
-        problem = '';
-      })
-      .catch((e) => {
-        if (asked === latest) problem = errorMessage(e);
-      });
+    untrack(check);
   });
 
-  const error = $derived(run.error || problem);
+  // One message, because a broken database fails both of these in the same words.
+  const unread = $derived(problem || run.readError);
+  const errors = $derived([missedError, run.error, unread].filter(Boolean));
+  const status = $derived(
+    importing && !run.running ? 'Reading your history. This screen will update when that finishes.' : run.phrase,
+  );
+
+  async function retry() {
+    await check();
+    await tick();
+    // Its button is gone when that worked, and focus would otherwise fall to the page.
+    if (!unread) ask?.querySelector('button')?.focus();
+  }
+
   const day = (secs: number) =>
     new Date(secs * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 </script>
@@ -36,13 +66,13 @@
   </header>
 
   <!-- Every button has a tabindex, because a WebKit webview skips one on Tab without it. -->
-  {#if hasHistory === false}
-    <div class="ask">
+  {#if hasHistory === false && !importing}
+    <div class="ask" bind:this={ask}>
       <p>There is nothing to roast yet. Add your history on the Sources screen, or try the demo data there.</p>
       <button tabindex="0" onclick={onsources}>Go to Sources</button>
     </div>
   {:else if hasHistory}
-    <div class="ask">
+    <div class="ask" bind:this={ask}>
       <p>Your Digest goes to Anthropic through Claude Code. It holds counts and names, never your raw Plays.</p>
       <!-- aria-disabled, because a disabled button drops keyboard focus to the page. start() checks too. -->
       <button tabindex="0" aria-disabled={run.running} onclick={() => run.start()}>
@@ -51,21 +81,24 @@
     </div>
   {/if}
 
-  <div class="progress" class:on={run.running}>
+  <div class="progress" class:on={status}>
     {#if run.running}
       <Dial share={18} />
     {/if}
     <div>
       <!-- Always mounted: a screen reader only announces a live region that was there before its text changed. -->
-      <p role="status" class="phrase">{run.phrase}</p>
+      <p role="status" class="phrase">{status}</p>
       {#if run.running}
         <p class="hint">This can take a minute or two. You can look at other screens while it runs.</p>
       {/if}
     </div>
   </div>
 
-  {#if error}
-    <p class="error" role="alert">{error}</p>
+  {#each errors as message}
+    <p class="error" role="alert">{message}</p>
+  {/each}
+  {#if unread}
+    <button class="retry" tabindex="0" onclick={retry}>Try again</button>
   {/if}
 
   <!-- All of this was written by a Provider, so it only ever goes in as text. -->
@@ -197,6 +230,12 @@
   .error {
     margin: 20px 0 0;
     color: #f08a7e;
+  }
+
+  .retry {
+    margin-top: 12px;
+    background: none;
+    color: var(--ivory);
   }
 
   /* What a Provider wrote is set in the serif, to read as something said about you. The app's own words stay in the sans. */

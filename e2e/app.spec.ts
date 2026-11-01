@@ -2265,7 +2265,8 @@ test('roast renders', async ({ page }) => {
   await expect(verdict.getByText(roast.verdict.sentence)).toBeVisible();
   await expect(verdict.getByRole('listitem')).toHaveText(roast.verdict.evidence);
 
-  await expect(status).toBeEmpty();
+  // Focus stays on the button and nothing else speaks up, so this is how a screen reader hears of it.
+  await expect(status).toHaveText('Your Roast is ready.');
   await expect(page.getByText('This can take a minute or two.')).toBeHidden();
   await expect(button).toHaveText('Roast me again');
   await expect(line).toBeVisible();
@@ -2398,6 +2399,80 @@ test('a Roast screen that cannot read what is stored says why, then recovers', a
   await expect(page.locator('main [role="alert"]:visible')).toHaveCount(0);
 });
 
+const UNREADABLE = 'Rostery could not read your last Roast. You can write a new one, and it takes the old one\'s place.';
+
+test('a stored Roast that cannot be read keeps the button, says so and can be retried', async ({ page }) => {
+  let broken = true;
+  await installMockIpc(page, {
+    ...withHistory,
+    latest_roast: () => {
+      if (broken) throw new Error(UNREADABLE);
+      return aRoast;
+    },
+  });
+  await openRoast(page);
+
+  await expect(page.getByRole('alert')).toHaveText(UNREADABLE);
+  await expect(roastButton(page)).toHaveText('Roast me');
+  await expect(page.getByText(DISCLOSURE)).toBeVisible();
+
+  const retry = page.getByRole('button', { name: 'Try again' });
+  await retry.click();
+  await settled(page);
+  await expect(page.getByRole('alert')).toHaveText(UNREADABLE);
+
+  broken = false;
+  await retry.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('heading', { level: 2, name: aRoast.roast.headline })).toBeVisible();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(retry).toHaveCount(0);
+  // Its button is gone, so focus goes to the one that is left and not to the page.
+  await expect(roastButton(page)).toBeFocused();
+});
+
+test('a new Roast takes the place of one that could not be read', async ({ page }) => {
+  const run = controlledRoast();
+  await installMockIpc(page, {
+    ...withHistory,
+    generate_roast: run.handler,
+    latest_roast: () => {
+      throw new Error(UNREADABLE);
+    },
+  });
+  await openRoast(page);
+  await expect(page.getByRole('alert')).toHaveText(UNREADABLE);
+
+  await roastButton(page).click();
+  await expect.poll(() => run.calls).toBe(1);
+  run.finish();
+
+  await expect(page.getByRole('heading', { level: 2, name: aRoast.roast.headline })).toBeVisible();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Try again' })).toHaveCount(0);
+});
+
+test('history that cannot be read can be retried on the Roast screen', async ({ page }) => {
+  let broken = true;
+  await installMockIpc(page, {
+    ...withHistory,
+    totals: () => {
+      if (broken) throw new Error('Rostery could not use its local database.');
+      return someHistory;
+    },
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Roast', exact: true }).click();
+  await expect(page.locator('main [role="alert"]:visible')).toContainText('could not use its local database');
+  await expect(roastButton(page)).toHaveCount(0);
+
+  broken = false;
+  await page.getByRole('button', { name: 'Try again' }).click();
+
+  await expect(roastButton(page)).toBeVisible();
+  await expect(page.locator('main [role="alert"]:visible')).toHaveCount(0);
+});
+
 test('history that arrives while the Roast screen is open makes the button appear', async ({ page }) => {
   let stored: Totals = { spotify: none, youtube: none };
   let finish = () => {};
@@ -2419,12 +2494,42 @@ test('history that arrives while the Roast screen is open makes the button appea
   await expect(page.getByRole('status')).toContainText('Reading your history');
 
   await page.getByRole('button', { name: 'Roast', exact: true }).click();
-  await expect(page.getByText('There is nothing to roast yet.')).toBeVisible();
+  // An import is running, so asking for history would be wrong.
+  await expect(page.getByRole('status')).toHaveText('Reading your history. This screen will update when that finishes.');
+  await expect(page.getByText('There is nothing to roast yet.')).toHaveCount(0);
   finish();
 
   await expect(roastButton(page)).toBeVisible();
   await expect(page.getByText('There is nothing to roast yet.')).toHaveCount(0);
+  await expect(page.getByRole('status')).toBeEmpty();
 });
+
+for (const [name, stored] of [
+  ['no', { spotify: none, youtube: none }],
+  ['older', someHistory],
+] as const) {
+  test(`an import that fails while the Roast screen is open says so, with ${name} history`, async ({ page }) => {
+    let fail = (_: Error) => {};
+    await installMockIpc(page, {
+      totals: () => stored,
+      has_demo_data: () => false,
+      latest_roast: () => null,
+      'plugin:dialog|open': () => ['/d/my_spotify_data.zip'],
+      import_paths: () => new Promise((_, reject) => (fail = reject)),
+    });
+    await page.goto('/');
+    await page.getByRole('button', { name: 'Choose file' }).click();
+    await page.getByRole('button', { name: 'Roast', exact: true }).click();
+    await expect(page.getByRole('status')).toContainText('Reading your history');
+
+    fail(new Error('Rostery cannot read that file.'));
+
+    await expect(page.locator('main [role="alert"]:visible')).toHaveText('Rostery cannot read that file.');
+    await expect(page.getByRole('status')).toBeEmpty();
+    if (stored === someHistory) await expect(roastButton(page)).toBeVisible();
+    else await expect(page.getByText('There is nothing to roast yet.')).toBeVisible();
+  });
+}
 
 test('a running Roast survives moving between screens and its result appears on coming back', async ({ page }) => {
   const run = controlledRoast();
@@ -2550,7 +2655,37 @@ test('a progress phrase that arrives after the Roast finished is ignored', async
   await emitEvent(page, 'roast-progress', 'Working out your score');
   await settled(page);
 
-  await expect(page.getByRole('status')).toBeEmpty();
+  await expect(page.getByRole('status')).toHaveText('Your Roast is ready.');
+});
+
+test('saying a Roast is ready stops once it is old news', async ({ page }) => {
+  const run = controlledRoast();
+  await installMockIpc(page, { ...withHistory, generate_roast: run.handler, latest_roast: () => run.saved });
+  await openRoast(page);
+  const status = page.getByRole('status');
+
+  await roastButton(page).click();
+  await expect.poll(() => run.calls).toBe(1);
+  run.finish();
+  await expect(status).toHaveText('Your Roast is ready.');
+
+  // The next run takes over the region, and a failure leaves it empty.
+  await roastButton(page).click();
+  await expect(status).toHaveText('Reading your history');
+  await expect.poll(() => run.calls).toBe(2);
+  run.fail('Claude Code did not finish.');
+  await expect(page.getByRole('alert')).toHaveText('Claude Code did not finish.');
+  await expect(status).toBeEmpty();
+
+  // Coming back to a Roast that landed earlier is not news either.
+  await roastButton(page).click();
+  await expect.poll(() => run.calls).toBe(3);
+  run.finish();
+  await expect(status).toHaveText('Your Roast is ready.');
+  await page.getByRole('button', { name: 'Sources', exact: true }).click();
+  await page.getByRole('button', { name: 'Roast', exact: true }).click();
+  await expect(page.getByRole('heading', { level: 2, name: aRoast.roast.headline })).toBeVisible();
+  await expect(status).toBeEmpty();
 });
 
 test('a Roast is only ever text, however hostile', async ({ page }) => {

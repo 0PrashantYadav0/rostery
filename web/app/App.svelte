@@ -60,7 +60,7 @@
     {#if screen === 'Universe'}
       <Universe {importing} {missedError} {stored} />
     {:else if screen === 'Roast'}
-      <Roast {stored} onsources={() => open('Sources')} />
+      <Roast {importing} {missedError} {stored} onsources={() => open('Sources')} />
     {/if}
   </main>
 </div>
