@@ -2,7 +2,7 @@
 
 use mockito::{Matcher, Server};
 use rostery_core::llm::{self, CompletionRequest, LocalServer, Provider};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::io::Read;
 use std::net::TcpListener;
 use std::process::Command;
@@ -149,6 +149,145 @@ fn local_api_key_sent_when_present() {
     };
     llm::complete(&provider, &request(), LONG_ENOUGH).unwrap();
     mock.assert();
+}
+
+/// The demo Digest with the default voice is 19,900 characters, and the longest there can be today
+/// with that voice is 72,500.
+fn request_of(chars: usize) -> CompletionRequest {
+    CompletionRequest {
+        system: "x".repeat(chars / 2),
+        user: "y".repeat(chars / 2),
+        schema: json!({}),
+    }
+}
+
+fn counted(tokens: Value) -> String {
+    json!({
+        "choices": [{"message": {"role": "assistant", "content": "a fine looking reply"}}],
+        "usage": {"prompt_tokens": tokens},
+    })
+    .to_string()
+}
+
+/// Ollama answers 200 with a reply that can look fine after it drops the start of a prompt its context
+/// cannot hold. Today it keeps about half the context, 2051 tokens of 4096. Its older runners kept all
+/// of it. Both are from its source.
+#[test]
+fn a_prompt_the_server_cut_says_so_and_how_to_fix_it() {
+    for (chars, tokens) in [
+        (19_900, 2051),
+        (19_900, 4096),
+        (72_500, 4098),
+        (72_500, 16_384),
+    ] {
+        let mut server = Server::new();
+        server
+            .mock("POST", "/v1/chat/completions")
+            .with_body(counted(json!(tokens)))
+            .create();
+        let url = base(&server);
+        let message = llm::complete(&local(&url), &request_of(chars), LONG_ENOUGH)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains(&url), "{message}");
+        assert!(message.contains(&tokens.to_string()), "{message}");
+        assert!(message.contains("context length"), "{message}");
+        assert!(message.contains("OLLAMA_CONTEXT_LENGTH"), "{message}");
+        assert!(message.contains("slider"), "{message}");
+    }
+
+    let mut server = Server::new();
+    server
+        .mock("POST", "/v1/chat/completions")
+        .with_body(counted(json!(2051)))
+        .create();
+    let lm_studio = Provider::Local {
+        server: LocalServer::LmStudio,
+        base_url: base(&server),
+        model: "tiny-model".into(),
+        api_key: None,
+    };
+    let message = llm::complete(&lm_studio, &request_of(19_900), LONG_ENOUGH)
+        .unwrap_err()
+        .to_string();
+    assert!(message.contains("LM Studio"), "{message}");
+    assert!(message.contains("context length"), "{message}");
+    assert!(!message.contains("OLLAMA"), "{message}");
+}
+
+/// A wrong refusal costs someone a Roast that was fine, so these have to pass.
+#[test]
+fn a_prompt_read_whole_is_not_called_cut() {
+    let hindi = CompletionRequest {
+        system: "क".repeat(20_000),
+        user: "y".repeat(3_000),
+        schema: json!({}),
+    };
+    for (request, tokens) in [
+        // About 3.75 and 5 characters to a token, which is JSON and plain prose.
+        (request_of(19_900), json!(5300)),
+        (request_of(19_900), json!(3980)),
+        // More than a token holds in bytes, but not in characters.
+        (hindi, json!(9500)),
+        // A prompt that holds less than a context, with room to spare.
+        (request_of(19_900), json!(32_768)),
+        // Nothing to go on.
+        (request_of(19_900), json!(0)),
+        (request_of(19_900), json!(null)),
+    ] {
+        let mut server = Server::new();
+        server
+            .mock("POST", "/v1/chat/completions")
+            .with_body(counted(tokens))
+            .create();
+        let reply = llm::complete(&local(&base(&server)), &request, LONG_ENOUGH);
+        assert_eq!(reply.unwrap(), "a fine looking reply");
+    }
+}
+
+/// In the words of llama-server, seen from a real one, and of Ollama, from its source.
+#[test]
+fn a_prompt_the_server_refused_as_too_long_says_how_to_fix_it() {
+    for body in [
+        r#"{"error":{"code":400,"message":"request (4867 tokens) exceeds the available context size (512 tokens), try increasing it","type":"exceed_context_size_error","n_prompt_tokens":4867,"n_ctx":512}}"#,
+        r#"{"error":{"message":"the prompt is longer than the context length currently available to the model; shorten the prompt, adjust the context length in settings, or use a model with a longer context length"}}"#,
+    ] {
+        let mut server = Server::new();
+        server
+            .mock("POST", "/v1/chat/completions")
+            .with_status(400)
+            .with_body(body)
+            .create();
+        let message = llm::complete(&local(&base(&server)), &request(), LONG_ENOUGH)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("400"), "{message}");
+        assert!(message.contains("OLLAMA_CONTEXT_LENGTH"), "{message}");
+        assert!(!message.contains("Check the model"), "{message}");
+    }
+}
+
+/// Settings says this about such a server, and a Roast has to say the same and not send someone to
+/// check a model that is fine.
+#[test]
+fn a_server_that_wants_a_key_says_so_when_a_roast_asks() {
+    for code in [401, 403] {
+        let mut server = Server::new();
+        server
+            .mock("POST", "/v1/chat/completions")
+            .with_status(code)
+            .with_body(r#"{"error":{"message":"invalid api key"}}"#)
+            .create();
+        let url = base(&server);
+        let message = llm::complete(&local(&url), &request(), LONG_ENOUGH)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains(&url), "{message}");
+        assert!(message.contains(&code.to_string()), "{message}");
+        assert!(message.contains("cannot send one yet"), "{message}");
+        assert!(message.contains("then try again"), "{message}");
+        assert!(!message.contains("Check the model"), "{message}");
+    }
 }
 
 #[test]

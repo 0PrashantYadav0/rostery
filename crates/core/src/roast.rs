@@ -256,11 +256,13 @@ fn generate_with(
 
 fn replied_twice(p: &Provider) -> String {
     let next = match p {
-        Provider::Local { .. } => {
-            "A small model often cannot, so if this keeps happening, choose a bigger one in Settings. \
-             Otherwise, try again."
-        }
-        _ => "Try again.",
+        Provider::Local { server, .. } => format!(
+            "A small model often cannot, and neither can one with too short a context length. If this \
+             keeps happening, choose a bigger model in Settings, or to raise its context length, {}. \
+             Otherwise, try again.",
+            server.how_to_raise_context()
+        ),
+        _ => "Try again.".to_owned(),
     };
     format!(
         "{} replied twice without a Roast Rostery could use. {next}",
@@ -517,7 +519,19 @@ mod tests {
             api_key: None,
         });
         assert!(local.starts_with("Ollama replied twice"), "{local}");
-        assert!(local.contains("bigger one in Settings"), "{local}");
+        assert!(local.contains("bigger model in Settings"), "{local}");
+        // A bigger model has the same short context, so that needs saying as well.
+        assert!(local.contains("context length"), "{local}");
+        assert!(local.contains("OLLAMA_CONTEXT_LENGTH"), "{local}");
+
+        let local = replied_twice(&Provider::Local {
+            server: llm::LocalServer::LmStudio,
+            base_url: String::new(),
+            model: String::new(),
+            api_key: None,
+        });
+        assert!(local.contains("context length"), "{local}");
+        assert!(!local.contains("OLLAMA"), "{local}");
     }
 
     #[test]

@@ -100,6 +100,19 @@ impl LocalServer {
             LocalServer::LmStudio => "Download a model in LM Studio",
         }
     }
+
+    /// 32768 holds the longest prompt there can be, which is about 24,000 tokens, and a reply.
+    pub(crate) fn how_to_raise_context(self) -> &'static str {
+        match self {
+            LocalServer::Ollama => {
+                "use the context length slider in the Ollama app's settings, or start the server with \
+                 OLLAMA_CONTEXT_LENGTH=32768 ollama serve"
+            }
+            LocalServer::LmStudio => {
+                "change it in the model's load settings in LM Studio and load the model again"
+            }
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -116,6 +129,9 @@ pub enum Provider {
         base_url: String,
         model: String,
         /// Sent when present, and never written to the settings JSON. A key belongs in the keychain.
+        // ponytail: nothing in the app sets this yet, so a server that wants a key cannot be used, and
+        // its status and any Roast say so. Task 14 reads it from `secrets` and sets it here before
+        // `complete` and `statuses`, because this crate has no keychain.
         #[serde(skip)]
         api_key: Option<String>,
     },
@@ -548,6 +564,25 @@ fn local_unreachable(
     })
 }
 
+/// What a status and a Roast both say about a server that turned them away, for them to finish.
+fn wants_a_key(server: LocalServer, base_url: &str, code: u16) -> String {
+    format!(
+        "The server at {base_url} answered {code}, so it wants an API key, and Rostery cannot send one \
+         yet. Turn that off in {}",
+        server.label()
+    )
+}
+
+/// Whether a server read less of a prompt than it was sent, going by the tokens it says it read. Text
+/// in any language runs to about 6 characters a token at the most, so far fewer tokens than that means
+/// some were dropped. Ollama keeps about half its context when it cuts. Its older runners kept all of
+/// it, which can look like ordinary text, apart from landing exactly on the power of two a context is.
+// ponytail: a cut that loses under half and lands on any other number goes unseen. Only a tokenizer
+// would settle it, and the OpenAI API has none. Characters and not bytes, so Hindi is not called cut.
+fn prompt_was_cut(sent_chars: u64, tokens: u64) -> bool {
+    tokens > 0 && (sent_chars / 6 > tokens || (tokens.is_power_of_two() && sent_chars / 3 > tokens))
+}
+
 fn local(
     server: LocalServer,
     base_url: &str,
@@ -582,17 +617,41 @@ fn local(
     let mut response = request.send(body.to_string()).map_err(failed)?;
     let text = read_body(&mut response).map_err(failed)?;
     if !response.status().is_success() {
+        let code = response.status().as_u16();
+        let said = error_detail(&text);
+        let quoted = said.trim_end_matches('.');
+        return Err(Error::Provider(if matches!(code, 401 | 403) {
+            format!("{}, then try again.", wants_a_key(server, base_url, code))
+        } else if said.to_lowercase().contains("context") {
+            format!(
+                "{label} at {base_url} answered with an error ({code}): {quoted}. To raise its context \
+                 length, {}, then try again.",
+                server.how_to_raise_context()
+            )
+        } else {
+            format!(
+                "{label} at {base_url} answered with an error ({code}): {quoted}. Check the model and \
+                 the address in Settings, then try again."
+            )
+        }));
+    }
+    let reply = serde_json::from_str::<Value>(&text).unwrap_or_default();
+    let sent_chars = req.system.chars().count() + req.user.chars().count();
+    if let Some(tokens) = reply["usage"]["prompt_tokens"]
+        .as_u64()
+        .filter(|&tokens| prompt_was_cut(sent_chars as u64, tokens))
+    {
         return Err(Error::Provider(format!(
-            "{label} at {base_url} answered with an error ({}): {}. Check the model and the address in \
-             Settings, then try again.",
-            response.status().as_u16(),
-            error_detail(&text).trim_end_matches('.'),
+            "{label} at {base_url} kept only {tokens} tokens of what Rostery sent, because its context \
+             length is too short, so the model would not have seen all of your system prompt and \
+             history. To raise it, {}, then try again.",
+            server.how_to_raise_context()
         )));
     }
-    serde_json::from_str::<Value>(&text)
-        .ok()
-        .and_then(|reply| reply["choices"][0]["message"]["content"].as_str().map(String::from))
+    reply["choices"][0]["message"]["content"]
+        .as_str()
         .filter(|content| !content.trim().is_empty())
+        .map(String::from)
         .ok_or_else(|| {
             Error::Provider(format!(
                 "{label} at {base_url} gave a reply Rostery could not read. Check that the address in \
@@ -782,7 +841,6 @@ pub fn local_status(server: LocalServer, base_url: &str, api_key: Option<&str>) 
         model: String::new(),
         api_key: None,
     };
-    let label = server.label();
     match list_models(base_url, api_key, LOCAL_STATUS_TIMEOUT) {
         Ok(models) if models.is_empty() => status_of(
             &p,
@@ -810,8 +868,8 @@ pub fn local_status(server: LocalServer, base_url: &str, api_key: Option<&str>) 
             false,
             false,
             format!(
-                "The server at {base_url} answered {code}, so it wants an API key, and Rostery cannot \
-                 send one yet. Turn that off in {label}, then check again."
+                "{}, then check again.",
+                wants_a_key(server, base_url, code)
             ),
             Vec::new(),
         ),
