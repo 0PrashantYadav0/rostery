@@ -23,4 +23,4 @@ We tested on 2026-11-07 with codex-cli 0.164.0 and a ChatGPT login, asking it to
 
 Codex ignores a key it does not know without a word, so a CLI that renames one of these brings that tool back. The read-only sandbox and the instructions are then what is left, and the live test above fails, so it runs at each stop point. Titles are shortened and stripped before they reach the Digest either way, and the user previews a Share Site before publishing it.
 
-Hosted Providers receive the Digest. "Runs locally" is only fully true with a local LLM, and the app says so in plain words before the first call.
+Hosted Providers receive the Digest. "Runs locally" is only fully true with a local LLM, and not with an Ollama cloud model, which Ollama runs on ollama.com through the same local port. The app says so in plain words before the first call.

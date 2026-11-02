@@ -83,7 +83,7 @@ There are two frontend builds from one package. `dist/app` is loaded by the desk
 | Action | What goes where |
 |---|---|
 | Import an Export | Nothing. |
-| Roast with a local LLM | Digest to the configured URL, with no proxy and no redirect. On a loopback address it stays on this computer. Any other address gets a warning that names the host. |
+| Roast with a local LLM | Digest to the configured URL, with no proxy and no redirect. On a loopback address it stays on this computer, unless the model is an Ollama cloud model. Ollama sends those to ollama.com through the same local port, so a name ending in `:cloud` or `-cloud` gets a warning that names Ollama's service and is never offered or filled in. Any other address gets a warning that names the host. |
 | Roast with Claude Code or Codex | Digest to Anthropic or OpenAI, under the user's subscription. It holds song and video titles, Creator names, Interests and dates. The app says this before each call and can show the exact Digest. |
 | Connect to a Source | OAuth requests to that Source. |
 | Publish | The Share Site to GitHub or Vercel. It becomes public. |
@@ -151,6 +151,8 @@ Rostery extracts the first JSON object from the reply that is a Roast, toleratin
 One Roast runs at a time, which Rust enforces as well as the screen. It belongs to the app and not to the screen, so it survives moving between screens, and the rail marks it while it runs and when it ends or fails. The Provider and the prompt are read when it starts, so changing Settings during a Roast only changes the next one. A CLI gets 5 minutes and a local server 10, since a model on a CPU is slow. Quitting the app stops a CLI that is still running. If the demo data a Roast is about leaves while it runs, the Roast is not kept, and the error says to press Roast me. A finished Roast waits up to 2 minutes for a busy database, where everything else waits 5 seconds. If it still cannot be saved, it shows anyway, with a sentence saying it will be gone when the app closes.
 
 Settings shows each Provider's state: whether its CLI is installed and logged in, or whether its server answers, with a next step when something is missing. Those checks spawn processes and call the network, so they run on a worker thread with a timeout each, 5 seconds for a CLI and 2 for a server, and the screen never waits for them. Settings stay in the `settings` key as JSON. A save runs one at a time and outlasts the screen that asked for it, so the next time Settings opens it builds on that save. If one fails with no screen left to say so, the next screen says it, and a system prompt that failed goes back in its box and gets tried again.
+
+Saved settings that cannot be read are older or damaged, and may have held a choice to keep history on this computer. So no Provider stands in for them. The Roast screen and Settings say so, no Roast starts, and nothing is chosen until the person chooses a Provider. Editing the prompt in the meantime does not count as choosing.
 
 A local server that wants an API key does not work yet. Its status and any Roast say so, and Task 14 adds the key to Settings. It will live in the keychain and never in the `settings` key.
 
