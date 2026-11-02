@@ -35,6 +35,15 @@ fn disclosure(provider: Provider) -> Disclosure {
     .disclosure()
 }
 
+fn with_model(model: &str) -> Provider {
+    Provider::Local {
+        server: LocalServer::Ollama,
+        base_url: "http://127.0.0.1:11434/v1".into(),
+        model: model.into(),
+        api_key: None,
+    }
+}
+
 fn base(server: &Server) -> String {
     format!("{}/v1", server.url())
 }
@@ -410,7 +419,7 @@ fn local_lists_models() {
 
 #[test]
 fn local_status_says_what_the_server_said() {
-    let ollama = |url: &str| llm::local_status(LocalServer::Ollama, url, None);
+    let ollama = |url: &str| llm::local_status(LocalServer::Ollama, url, "", None);
 
     let mut server = Server::new();
     server
@@ -465,7 +474,7 @@ fn a_status_check_that_hangs_costs_two_seconds() {
         }
     });
     let started = Instant::now();
-    let status = llm::local_status(LocalServer::Ollama, &url, None);
+    let status = llm::local_status(LocalServer::Ollama, &url, "", None);
     assert!(
         (Duration::from_millis(1800)..Duration::from_secs(4)).contains(&started.elapsed()),
         "took {:?}",
@@ -511,6 +520,81 @@ fn only_a_real_loopback_address_counts_as_this_computer() {
     }
     let named = disclosure(local("http://127.0.0.1@evil.example:80/v1"));
     assert!(named.sends_to.contains("evil.example"), "{named:?}");
+}
+
+/// Ollama serves these through the same local port and runs them on ollama.com. Its own rule, in
+/// `internal/modelref`, ignores case. A name that only has the word in it stays here.
+#[test]
+fn a_cloud_model_on_a_loopback_address_leaves_this_computer() {
+    for model in [
+        "gpt-oss:20b-cloud",
+        "gemma4:cloud",
+        "GEMMA4:CLOUD",
+        " gemma4:cloud ",
+        "kimi-k2-cloud",
+    ] {
+        let said = disclosure(with_model(model));
+        assert!(said.flagged, "{model}: {said:?}");
+        assert!(said.sends_to.contains(model.trim()), "{said:?}");
+        assert!(said.sends_to.contains("leaves this computer"), "{said:?}");
+        assert!(said.sends_to.contains("ollama.com"), "{said:?}");
+        assert!(said.sends_to.contains("titles"), "{said:?}");
+        assert!(!said.sends_to.contains("stays on"), "{said:?}");
+    }
+    for model in ["", "llama3:8b", "cloudy:7b", "cloud", "cloud-9:latest"] {
+        let said = disclosure(with_model(model));
+        assert!(!said.flagged, "{model}: {said:?}");
+        assert!(said.sends_to.contains("stays on this computer"), "{said:?}");
+    }
+}
+
+/// The screen fills in the first model offered, so a cloud one must never be offered.
+#[test]
+fn local_status_offers_no_cloud_model_and_says_where_a_saved_one_goes() {
+    let mut server = Server::new();
+    server
+        .mock("GET", "/v1/models")
+        .with_body(r#"{"data":[{"id":"gpt-oss:20b-cloud"},{"id":"tiny"},{"id":"gemma4:cloud"}]}"#)
+        .create();
+    let url = base(&server);
+
+    let nothing_saved = llm::local_status(LocalServer::Ollama, &url, "", None);
+    assert_eq!(nothing_saved.models, ["tiny"]);
+    assert!(nothing_saved.available, "{nothing_saved:?}");
+    assert!(
+        nothing_saved.detail.contains("1 model."),
+        "{nothing_saved:?}"
+    );
+    assert!(
+        nothing_saved.detail.contains("ollama.com"),
+        "{nothing_saved:?}"
+    );
+    assert!(!nothing_saved.flagged, "{nothing_saved:?}");
+
+    let saved = llm::local_status(LocalServer::Ollama, &url, "gpt-oss:20b-cloud", None);
+    assert!(saved.flagged, "{saved:?}");
+    assert!(saved.sends_to.contains("ollama.com"), "{saved:?}");
+    assert!(!saved.sends_to.contains("stays on"), "{saved:?}");
+
+    let mut server = Server::new();
+    server
+        .mock("GET", "/v1/models")
+        .with_body(r#"{"data":[{"id":"gemma4:cloud"}]}"#)
+        .create();
+    let only_cloud = llm::local_status(LocalServer::Ollama, &base(&server), "", None);
+    assert!(only_cloud.models.is_empty(), "{only_cloud:?}");
+    assert!(!only_cloud.available, "{only_cloud:?}");
+    assert!(only_cloud.detail.contains("ollama pull"), "{only_cloud:?}");
+    assert!(only_cloud.detail.contains("ollama.com"), "{only_cloud:?}");
+
+    // With no cloud model to speak of, the words say nothing about them.
+    let mut server = Server::new();
+    server
+        .mock("GET", "/v1/models")
+        .with_body(r#"{"data":[{"id":"tiny"}]}"#)
+        .create();
+    let none = llm::local_status(LocalServer::Ollama, &base(&server), "", None);
+    assert!(!none.detail.contains("ollama.com"), "{none:?}");
 }
 
 /// A proxy on a loopback call would take the Digest somewhere the screen says it does not go. This

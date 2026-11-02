@@ -110,7 +110,7 @@
   }
 
   /**
-   * A local Provider cannot start with no model, so it takes the first its server has until told otherwise.
+   * A local Provider cannot start with no model, so it takes the first its server offers, never a cloud model, until told otherwise.
    * What is in the box may not be saved yet, and a person in the box may be about to tell it otherwise.
    */
   function fillModel() {
@@ -120,8 +120,14 @@
     if (first && !modelOf(setup(chosen))) setModel(first);
   }
 
-  function setModel(model: string) {
-    update((s) => ({ ...s, provider: withModel(s.provider, model) })).then((why) => (modelProblem = why));
+  async function setModel(model: string) {
+    modelProblem = await update((s) => ({ ...s, provider: withModel(s.provider, model) }));
+    return modelProblem;
+  }
+
+  /** The words on its row are about the saved model. One filled in from the list stays on this computer and changes nothing there. */
+  async function modelTyped(model: string) {
+    if (!(await setModel(model))) check();
   }
 
   async function setAddress(baseUrl: string) {
@@ -303,7 +309,7 @@
                     autocapitalize="off"
                     autocomplete="off"
                     placeholder={'local' in provider ? 'Needed before a Roast can start' : `Leave empty for what ${name} uses by default`}
-                    onchange={(e) => setModel(e.currentTarget.value)}
+                    onchange={(e) => modelTyped(e.currentTarget.value)}
                     onblur={fillModel}
                   />
                 </label>

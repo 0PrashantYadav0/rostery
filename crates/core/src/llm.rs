@@ -712,6 +712,16 @@ fn is_loopback(host: &str) -> bool {
             .is_ok_and(|ip| ip.is_loopback())
 }
 
+/// Ollama passes a model with one of these endings on to ollama.com, through the same local port.
+/// Ollama itself only counts the ending on a tag, so `some-cloud` is a false alarm here, the safe way.
+// ponytail: this goes by the name, because that is all `/v1/models` gives and a disclosure calls no
+// network. An alias made with `ollama create` from a cloud model has an ordinary name and still goes
+// there. Only `/api/tags` says so, as `remote_host`, so ask that if aliases turn out to matter.
+fn is_cloud_model(model: &str) -> bool {
+    let name = model.trim().to_ascii_lowercase();
+    name.ends_with(":cloud") || name.ends_with("-cloud")
+}
+
 /// What the person reads before anything goes anywhere.
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -734,8 +744,20 @@ fn disclosure(p: &Provider) -> Disclosure {
             false,
         ),
         Provider::Local {
-            server, base_url, ..
+            server,
+            base_url,
+            model,
+            ..
         } => match host_of(base_url) {
+            // On either row, because either row's address can point at an Ollama.
+            Some(host) if is_loopback(&host) && is_cloud_model(model) => (
+                format!(
+                    "Warning: {} is a cloud model, so your Digest leaves this computer and goes to \
+                     Ollama's service at ollama.com. {DIGEST_HOLDS}",
+                    model.trim()
+                ),
+                true,
+            ),
             Some(host) if is_loopback(&host) => (
                 format!(
                     "Your Digest stays on this computer. It goes to {} here at {base_url}. {DIGEST_HOLDS}",
@@ -769,7 +791,7 @@ pub struct ProviderStatus {
     pub detail: String,
     pub sends_to: String,
     pub flagged: bool,
-    /// What a local server has to offer.
+    /// What a local server has to offer, which is never a cloud model.
     pub models: Vec<String>,
 }
 
@@ -838,33 +860,49 @@ fn cli_status(
     }
 }
 
-/// The status of a local server, which is whether it lists its models.
-pub fn local_status(server: LocalServer, base_url: &str, api_key: Option<&str>) -> ProviderStatus {
+/// The status of a local server, which is whether it lists its models. `model` is the one saved for
+/// it, so that `sends_to` is about what a Roast would use. Cloud models are not offered, because the
+/// screen fills in the first model it is offered. Typing one's name still works, and gets a warning.
+pub fn local_status(
+    server: LocalServer,
+    base_url: &str,
+    model: &str,
+    api_key: Option<&str>,
+) -> ProviderStatus {
     let p = Provider::Local {
         server,
         base_url: base_url.to_owned(),
-        model: String::new(),
+        model: model.to_owned(),
         api_key: None,
     };
-    match list_models(base_url, api_key, LOCAL_STATUS_TIMEOUT) {
-        Ok(models) if models.is_empty() => status_of(
+    let listed = list_models(base_url, api_key, LOCAL_STATUS_TIMEOUT).map(|all| {
+        let (cloud, here): (Vec<_>, Vec<_>) = all.into_iter().partition(|m| is_cloud_model(m));
+        let left_out = if cloud.is_empty() {
+            ""
+        } else {
+            " Its cloud models are not listed, because they would send your Digest to ollama.com."
+        };
+        (here, left_out)
+    });
+    match listed {
+        Ok((models, left_out)) if models.is_empty() => status_of(
             &p,
             false,
             true,
             format!(
-                "Running at {base_url}, with no models yet. {}, then check again.",
+                "Running at {base_url}, with no models yet.{left_out} {}, then check again.",
                 server.how_to_get_a_model()
             ),
             models,
         ),
-        Ok(models) => {
+        Ok((models, left_out)) => {
             let count = models.len();
             let unit = if count == 1 { "model" } else { "models" };
             status_of(
                 &p,
                 true,
                 true,
-                format!("Running at {base_url}, with {count} {unit}."),
+                format!("Running at {base_url}, with {count} {unit}.{left_out}"),
                 models,
             )
         }
@@ -924,9 +962,9 @@ pub fn statuses(settings: &Settings) -> Vec<ProviderStatus> {
         Provider::Local {
             server,
             base_url,
+            model,
             api_key,
-            ..
-        } => local_status(*server, base_url, api_key.as_deref()),
+        } => local_status(*server, base_url, model, api_key.as_deref()),
     };
     let setups = settings.in_card_order();
     std::thread::scope(|scope| {

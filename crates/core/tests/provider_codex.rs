@@ -500,6 +500,26 @@ fn statuses_detect_cli_login() {
     }
 }
 
+/// The words on each row have to be about that row's saved model, chosen or not.
+#[test]
+fn a_status_says_where_the_model_saved_on_that_row_would_send_a_digest() {
+    let fake = Fake::new(OK);
+    std::env::set_var("ROSTERY_CLAUDE_BIN", fake.dir.path().join("no-claude"));
+    std::env::set_var("ROSTERY_CODEX_BIN", fake.dir.path().join("no-codex"));
+    let mut settings = settings_with_nothing_listening();
+    let Provider::Local { model, .. } = &mut settings.others[1] else {
+        panic!("the Ollama row")
+    };
+    *model = "gpt-oss:20b-cloud".into();
+
+    let all = llm::statuses(&settings);
+
+    let cloud = status(&all, "ollama");
+    assert!(cloud.flagged, "{cloud:?}");
+    assert!(cloud.sends_to.contains("ollama.com"), "{cloud:?}");
+    assert!(!status(&all, "lm-studio").flagged);
+}
+
 #[test]
 fn a_cli_saying_exit_0_without_logged_in_is_not_taken_at_its_word() {
     let fake = Fake::new(OK);

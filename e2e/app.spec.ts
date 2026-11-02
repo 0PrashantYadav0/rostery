@@ -3211,6 +3211,25 @@ test('a prompt typed with no Provider chosen is still saved when a dropped file 
   expect(mocks.state.saved.chooseAgain).toBe(true);
 });
 
+test('the words on a row follow a model as soon as it is typed and saved', async ({ page }) => {
+  const mocks = settingsMocks(onOllama());
+  const saved = () => (mocks.state.saved.provider as { local: { model: string } }).local.model;
+  await installMockIpc(page, {
+    ...empty,
+    latest_roast: () => null,
+    ...mocks.handlers,
+    provider_statuses: () => everyStatus.map((s) => (s.id === 'ollama' ? { ...s, sendsTo: `Goes with "${saved()}".` } : s)),
+  });
+  await openSettings(page);
+
+  const row = page.locator('.row > label', { has: page.getByRole('radio', { name: /Ollama/ }) });
+  await expect(row).toHaveAttribute('title', 'Goes with "".');
+  const model = page.getByRole('combobox', { name: 'Model' });
+  await model.fill('gpt-oss:20b-cloud');
+  await model.blur();
+  await expect(row).toHaveAttribute('title', 'Goes with "gpt-oss:20b-cloud".');
+});
+
 test('each Provider shows its status and a next step, and Check again asks again', async ({ page }) => {
   let statuses = everyStatus;
   let asked = 0;
@@ -3386,14 +3405,16 @@ test('a status answer leaves alone a model being typed, and fills in one left em
   await model.blur();
   await expect.poll(() => (providerOf(mocks.state.saved, 'local') as any).local.model).toBe('my-own-model');
   expect(JSON.stringify(mocks.state.saves)).not.toContain('first-model');
+  // A typed model is asked about again, because the words on its row are about what is saved.
+  await expect.poll(() => statuses.answers.length).toBe(2);
 
   // Looking in the box and typing nothing is not a choice, and a Roast cannot start with no model.
   mocks.state.saved = onOllama();
   await page.goto('/');
   await leave(page, 'Settings');
-  await expect.poll(() => statuses.answers.length).toBe(2);
+  await expect.poll(() => statuses.answers.length).toBe(3);
   await model.click();
-  statuses.answers[1](offering('first-model'));
+  statuses.answers[2](offering('first-model'));
   await expect(page.getByText('with 1 model.')).toBeVisible();
   await expect(model).toHaveValue('');
   await model.blur();
