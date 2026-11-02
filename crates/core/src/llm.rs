@@ -58,6 +58,9 @@ const MAX_MODEL_NAME: usize = 200;
 /// Far more than the default, and still small enough for one argument of a command line.
 pub const MAX_SYSTEM_PROMPT_CHARS: usize = 20_000;
 const SETTINGS_KEY: &str = "settings";
+const SETTINGS_LOST: &str =
+    "Rostery could not read your saved settings, so it no longer knows which \
+     Provider you chose. Your Digest stays on this computer until you choose one in Settings.";
 const DIGEST_HOLDS: &str =
     "It holds song and video titles, Creator names, Interests and dates, never your raw Plays.";
 
@@ -714,11 +717,13 @@ fn is_loopback(host: &str) -> bool {
 #[serde(rename_all = "camelCase")]
 pub struct Disclosure {
     pub sends_to: String,
-    /// A local Provider on some other computer, so the words above are a warning.
+    /// The Digest would not go where a local Provider suggests, or Rostery no longer knows where it
+    /// should go, so the words above are a warning.
     pub flagged: bool,
 }
 
-pub fn disclosure(p: &Provider) -> Disclosure {
+/// Private, because only `Settings` knows whether its Provider is one the person chose.
+fn disclosure(p: &Provider) -> Disclosure {
     let (sends_to, flagged) = match p {
         Provider::ClaudeCode { .. } => (
             format!("Your Digest goes to Anthropic through Claude Code. {DIGEST_HOLDS}"),
@@ -950,6 +955,11 @@ pub struct Settings {
     /// How each of the others was set up, so trying one does not lose another's address or model.
     #[serde(default)]
     pub others: Vec<Provider>,
+    /// What was saved could not be read, so `provider` is only a placeholder that nobody chose, and no
+    /// Digest goes anywhere until someone does. Kept when saved, because changing the prompt is not
+    /// choosing a Provider.
+    #[serde(default)]
+    pub choose_again: bool,
 }
 
 fn every_provider() -> [Provider; 4] {
@@ -974,6 +984,7 @@ impl Default for Settings {
             provider,
             system_prompt: None,
             others: others.to_vec(),
+            choose_again: false,
         }
     }
 }
@@ -1021,6 +1032,27 @@ impl Settings {
         }
     }
 
+    /// Where the next Roast would go.
+    pub fn disclosure(&self) -> Disclosure {
+        if self.choose_again {
+            Disclosure {
+                sends_to: SETTINGS_LOST.to_owned(),
+                flagged: true,
+            }
+        } else {
+            disclosure(&self.provider)
+        }
+    }
+
+    /// The Provider a Digest may go to, which is only ever one the person chose.
+    pub fn provider_to_send_to(&self) -> Result<&Provider> {
+        if self.choose_again {
+            Err(Error::Settings(SETTINGS_LOST.to_owned()))
+        } else {
+            Ok(&self.provider)
+        }
+    }
+
     /// `provider` and `others` in the order the cards go in.
     pub fn in_card_order(&self) -> Vec<&Provider> {
         let mut all: Vec<&Provider> = std::iter::once(&self.provider)
@@ -1038,13 +1070,16 @@ impl Settings {
             .unwrap_or(roast::default_system_prompt())
     }
 
-    /// What was saved. Settings that cannot be read are older or damaged, and nothing in them is worth
-    /// a Roast that can never start, so they count as never set. The Roast screen says where a Digest
-    /// is going before anything goes.
+    /// What was saved. Settings that cannot be read are older or damaged, and may have held a choice to
+    /// keep history on this computer. So they ask for a Provider again, which takes one click, and a
+    /// hosted one does not quietly take over.
     pub fn load(store: &Store) -> Result<Settings> {
         match store.get_setting::<Settings>(SETTINGS_KEY) {
             Ok(saved) => Ok(saved.unwrap_or_default().tidied()),
-            Err(Error::Json(_)) => Ok(Settings::default()),
+            Err(Error::Json(_)) => Ok(Settings {
+                choose_again: true,
+                ..Settings::default()
+            }),
             Err(e) => Err(e),
         }
     }
@@ -1480,6 +1515,9 @@ mod tests {
         assert_eq!(settings.provider, Provider::ClaudeCode { model: None });
         assert_eq!(settings.voice(), roast::default_system_prompt());
         assert_eq!(settings.in_card_order().len(), 4);
+        // Having nothing saved is not having lost anything, so this one starts without a warning.
+        assert!(!settings.disclosure().flagged);
+        assert!(settings.provider_to_send_to().is_ok());
     }
 
     #[test]
@@ -1497,6 +1535,7 @@ mod tests {
                 },
                 Provider::Codex { model: None },
             ],
+            ..Settings::default()
         }
         .save(&store)
         .unwrap();
@@ -1524,6 +1563,7 @@ mod tests {
             provider: with_key(LocalServer::Ollama),
             system_prompt: None,
             others: vec![with_key(LocalServer::LmStudio)],
+            ..Settings::default()
         }
         .save(&store)
         .unwrap();
@@ -1533,13 +1573,72 @@ mod tests {
         assert!(!raw.contains("apiKey"), "{raw}");
     }
 
+    /// They may have held a choice to keep history on this computer, and a send cannot be recalled.
     #[test]
-    fn settings_that_cannot_be_read_count_as_never_set() {
+    fn settings_that_cannot_be_read_send_nothing_until_a_provider_is_chosen() {
+        let store = Store::open_in_memory().unwrap();
+        // An Ollama choice with its `server` gone, as an older, newer or damaged save could be.
+        store
+            .set_setting(
+                "settings",
+                &json!({
+                    "provider": {"local": {"baseUrl": "http://127.0.0.1:11434/v1", "model": "tiny"}},
+                    "systemPrompt": null,
+                }),
+            )
+            .unwrap();
+
+        let lost = Settings::load(&store).unwrap();
+        let said = lost.disclosure();
+        assert!(said.flagged, "{said:?}");
+        assert!(said.sends_to.contains("could not read"), "{said:?}");
+        assert!(said.sends_to.contains("choose one in Settings"), "{said:?}");
+        assert!(!said.sends_to.contains("Anthropic"), "{said:?}");
+        let refused = lost.provider_to_send_to().unwrap_err().to_string();
+        assert_eq!(refused, said.sends_to);
+
+        // Editing the prompt is not choosing a Provider, even though it saves over the damaged row.
+        let kept = Settings {
+            system_prompt: Some("Be gentle.".into()),
+            ..lost
+        }
+        .save(&store)
+        .unwrap();
+        assert_eq!(kept.voice(), "Be gentle.");
+        let still_lost = Settings::load(&store).unwrap();
+        assert!(still_lost.disclosure().flagged);
+        assert!(still_lost.provider_to_send_to().is_err());
+
+        Settings {
+            choose_again: false,
+            ..kept
+        }
+        .save(&store)
+        .unwrap();
+        let chosen = Settings::load(&store).unwrap();
+        assert!(!chosen.disclosure().flagged);
+        assert_eq!(chosen.voice(), "Be gentle.");
+        assert_eq!(
+            chosen.provider_to_send_to().unwrap(),
+            &Provider::ClaudeCode { model: None }
+        );
+    }
+
+    #[test]
+    fn a_save_from_before_a_provider_could_be_lost_is_still_a_choice() {
         let store = Store::open_in_memory().unwrap();
         store
-            .set_setting("settings", &json!({"provider": "from the future"}))
+            .set_setting(
+                "settings",
+                &json!({"provider": {"codex": {"model": null}}, "systemPrompt": null}),
+            )
             .unwrap();
-        assert_eq!(Settings::load(&store).unwrap(), Settings::default());
+        let settings = Settings::load(&store).unwrap();
+        assert_eq!(
+            settings.provider_to_send_to().unwrap(),
+            &Provider::Codex { model: None }
+        );
+        assert!(!settings.disclosure().flagged);
     }
 
     #[test]

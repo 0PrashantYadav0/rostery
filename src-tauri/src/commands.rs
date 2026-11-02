@@ -104,7 +104,7 @@ fn run_roast(state: &AppState, progress: impl Fn(&str) + Sync) -> Result<Finishe
     let store = Store::open(&state.db_path)?;
     // Read once, here, so changing Settings during a Roast only changes the next one.
     let settings = Settings::load(&store)?;
-    let provider = &settings.provider;
+    let provider = settings.provider_to_send_to()?;
     let from_demo = store.has_demo_data()?;
     let digest = digest::from_store(&store, now())?;
     let (finished, waiting) = mpsc::channel::<()>();
@@ -176,7 +176,7 @@ pub fn provider_statuses(state: State<'_, AppState>) -> Result<Vec<ProviderStatu
 #[tauri::command(async)]
 pub fn provider_disclosure(state: State<'_, AppState>) -> Result<Disclosure, Error> {
     let settings = Settings::load(&Store::open(&state.db_path)?)?;
-    Ok(llm::disclosure(&settings.provider))
+    Ok(settings.disclosure())
 }
 
 #[tauri::command(async)]
@@ -447,7 +447,7 @@ mod tests {
                 model: Some("haiku".into()),
             },
             system_prompt: Some("Speak only of soup.".into()),
-            others: Vec::new(),
+            ..Settings::default()
         });
 
         let saved = run_roast(&rig.state, silent).unwrap().roast;
@@ -490,7 +490,7 @@ mod tests {
             rig.save(Settings {
                 provider: Provider::Codex { model: None },
                 system_prompt: Some("The second voice.".into()),
-                others: Vec::new(),
+                ..Settings::default()
             });
             std::fs::write(&go, "").unwrap();
 
@@ -500,6 +500,25 @@ mod tests {
         let argv = rig.argv();
         assert!(argv.contains("The first voice."), "{argv}");
         assert!(!argv.contains("The second voice."), "{argv}");
+    }
+
+    #[test]
+    fn settings_that_cannot_be_read_send_no_digest_until_a_provider_is_chosen() {
+        let rig = Rig::with_history(CAT_REPLY, REPLY);
+        Store::open(&rig.state.db_path)
+            .unwrap()
+            .set_setting("settings", &"from the future")
+            .unwrap();
+
+        let refused = run_roast(&rig.state, silent).err().unwrap().to_string();
+        assert!(refused.contains("could not read"), "{refused}");
+        assert!(refused.contains("choose one in Settings"), "{refused}");
+        assert_eq!(rig.calls(), 0);
+        assert!(rig.latest().is_none());
+
+        rig.save(Settings::default());
+        run_roast(&rig.state, silent).unwrap();
+        assert_eq!(rig.calls(), 1);
     }
 
     #[test]

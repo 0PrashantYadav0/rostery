@@ -1,7 +1,7 @@
 //! The real `llm::complete` and friends against `mockito`, the way a local server would answer.
 
 use mockito::{Matcher, Server};
-use rostery_core::llm::{self, CompletionRequest, LocalServer, Provider};
+use rostery_core::llm::{self, CompletionRequest, Disclosure, LocalServer, Provider, Settings};
 use serde_json::{json, Value};
 use std::io::Read;
 use std::net::TcpListener;
@@ -25,6 +25,14 @@ fn local(base_url: &str) -> Provider {
         model: "tiny-model".into(),
         api_key: None,
     }
+}
+
+fn disclosure(provider: Provider) -> Disclosure {
+    Settings {
+        provider,
+        ..Settings::default()
+    }
+    .disclosure()
 }
 
 fn base(server: &Server) -> String {
@@ -469,13 +477,13 @@ fn a_status_check_that_hangs_costs_two_seconds() {
 
 #[test]
 fn non_loopback_is_flagged() {
-    let far = llm::disclosure(&local("http://192.168.1.5:11434/v1"));
+    let far = disclosure(local("http://192.168.1.5:11434/v1"));
     assert!(far.flagged, "{far:?}");
     assert!(far.sends_to.contains("192.168.1.5"), "{far:?}");
     assert!(far.sends_to.contains("leaves this computer"), "{far:?}");
     assert!(far.sends_to.contains("titles"), "{far:?}");
 
-    let near = llm::disclosure(&local("http://127.0.0.1:11434/v1"));
+    let near = disclosure(local("http://127.0.0.1:11434/v1"));
     assert!(!near.flagged, "{near:?}");
     assert!(near.sends_to.contains("stays on this computer"), "{near:?}");
     assert!(!near.sends_to.contains("leaves"), "{near:?}");
@@ -499,9 +507,9 @@ fn only_a_real_loopback_address_counts_as_this_computer() {
         ("https://evil.example/v1", false),
         ("not an address at all", false),
     ] {
-        assert_eq!(!llm::disclosure(&local(url)).flagged, stays, "{url}");
+        assert_eq!(!disclosure(local(url)).flagged, stays, "{url}");
     }
-    let named = llm::disclosure(&local("http://127.0.0.1@evil.example:80/v1"));
+    let named = disclosure(local("http://127.0.0.1@evil.example:80/v1"));
     assert!(named.sends_to.contains("evil.example"), "{named:?}");
 }
 

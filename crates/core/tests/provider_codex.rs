@@ -459,6 +459,7 @@ fn settings_with_nothing_listening() -> Settings {
                 api_key: None,
             },
         ],
+        choose_again: false,
     }
 }
 

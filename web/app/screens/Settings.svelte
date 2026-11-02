@@ -26,8 +26,8 @@
     { id: 'lm-studio', name: 'LM Studio' },
   ];
 
-  /** Set once this screen has read what is saved, which everything below it waits for. */
-  let chosen = $state<ProviderId>();
+  /** Set once this screen has read what is saved, which everything below it waits for. Null when that has to be chosen again. */
+  let chosen = $state<ProviderId | null>();
   let statuses = $state.raw<ProviderStatus[]>([]);
   let checking = $state(false);
   let checked = $state(false);
@@ -56,6 +56,7 @@
 
   const idOf = (p: Provider): ProviderId =>
     'claudeCode' in p ? 'claude-code' : 'codex' in p ? 'codex' : p.local.server === 'ollama' ? 'ollama' : 'lm-studio';
+  const chosenIn = (s: Settings) => (s.chooseAgain ? null : idOf(s.provider));
   const setup = (id: ProviderId) => [settings!.provider, ...settings!.others].find((p) => idOf(p) === id)!;
   const modelOf = (p: Provider) => ('claudeCode' in p ? p.claudeCode.model : 'codex' in p ? p.codex.model : p.local.model) ?? '';
   const withModel = (p: Provider, model: string): Provider =>
@@ -134,11 +135,11 @@
     problem = addressProblem = modelProblem = '';
     const why = await update((s) => {
       const all = [s.provider, ...s.others];
-      return { ...s, provider: all.find((p) => idOf(p) === id)!, others: all.filter((p) => idOf(p) !== id) };
+      return { ...s, chooseAgain: false, provider: all.find((p) => idOf(p) === id)!, others: all.filter((p) => idOf(p) !== id) };
     });
     if (why) {
       problem = why;
-      chosen = idOf(settings!.provider);
+      chosen = chosenIn(settings!);
       return;
     }
     fillModel();
@@ -210,7 +211,7 @@
         const [saved, voice] = await Promise.all([getSettings(), defaultSystemPrompt()]);
         if (destroyed) return;
         settings = saved;
-        chosen = idOf(saved.provider);
+        chosen = chosenIn(saved);
         defaultPrompt = voice;
         prompt = unsaved.prompt ?? promptSaved();
         // A prompt is back in its box, and trying again says whether it is saved now. Anything else has only its reason left.
@@ -231,7 +232,7 @@
       // The box that still holds what was refused is going, so its message goes on to the next screen.
       unsaved.why = addressProblem || modelProblem || unsaved.why;
       // Leaving is not always a blur, because a dropped file changes the screen by itself.
-      if (chosen && prompt !== promptSaved()) savePrompt();
+      if (chosen !== undefined && prompt !== promptSaved()) savePrompt();
     };
   });
 </script>
@@ -247,7 +248,7 @@
     <p class="error" role="alert" use:bringIntoView>{message}</p>
   {/each}
 
-  {#if chosen}
+  {#if chosen !== undefined}
     <section aria-labelledby="provider-name">
       <div class="heading">
         <h2 id="provider-name">Provider</h2>

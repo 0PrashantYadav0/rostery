@@ -3067,6 +3067,7 @@ const allProviders = (): Settings => ({
     { local: { server: 'ollama', baseUrl: 'http://127.0.0.1:11434/v1', model: '' } },
     { local: { server: 'lmStudio', baseUrl: 'http://127.0.0.1:1234/v1', model: '' } },
   ],
+  chooseAgain: false,
 });
 const statusOf = (id: ProviderStatus['id'], rest: Partial<ProviderStatus> = {}): ProviderStatus => ({
   id,
@@ -3113,8 +3114,8 @@ const providerOf = (settings: Settings, key: string) => [settings.provider, ...s
 
 /** Ollama chosen, and no model yet, which is when a status answer fills one in. */
 const onOllama = (): Settings => {
-  const { provider, others, systemPrompt } = allProviders();
-  return { provider: others[1], systemPrompt, others: [provider, others[0], others[2]] };
+  const { provider, others, ...rest } = allProviders();
+  return { ...rest, provider: others[1], others: [provider, others[0], others[2]] };
 };
 /** Status checks that each wait to be answered. */
 function controlledStatuses() {
@@ -3146,6 +3147,68 @@ test('provider choice persists', async ({ page }) => {
   await expect(codex).toBeChecked();
   await openSettings(page);
   await expect(codex).toBeChecked();
+});
+
+test('saved settings that could not be read ask for a Provider, and only choosing one ends that', async ({ page }) => {
+  const lost = { sendsTo: 'Rostery could not read your saved settings.', flagged: true };
+  const mocks = settingsMocks({ ...allProviders(), chooseAgain: true });
+  let refuseNext = true;
+  await installMockIpc(page, {
+    ...empty,
+    latest_roast: () => null,
+    ...mocks.handlers,
+    provider_disclosure: () => (mocks.state.saved.chooseAgain ? lost : CLAUDE_CODE),
+    save_settings: (args: { settings: Settings }) => {
+      if (!args.settings.chooseAgain && refuseNext) {
+        refuseNext = false;
+        throw new Error(NO_DATABASE);
+      }
+      return mocks.handlers.save_settings(args);
+    },
+  });
+  await openSettings(page);
+
+  const radios = page.getByRole('radio');
+  await expect(radios).toHaveCount(4);
+  for (const radio of await radios.all()) await expect(radio).not.toBeChecked();
+  const line = page.getByText(lost.sendsTo);
+  await expect(line).toBeVisible();
+  await expect(page.locator('.sends')).toHaveClass(/flagged/);
+
+  // A change to the prompt is kept, and it is not a choice of Provider.
+  const box = page.getByRole('textbox', { name: 'System prompt' });
+  await box.fill('Be gentle.');
+  await box.blur();
+  await expect.poll(() => mocks.state.saved.systemPrompt).toBe('Be gentle.');
+  expect(mocks.state.saved.chooseAgain).toBe(true);
+  await expect(line).toBeVisible();
+
+  // A choice that fails leaves nothing chosen.
+  await page.getByRole('radio', { name: /Codex/ }).click();
+  await expect(visibleAlert(page)).toContainText(NO_DATABASE);
+  for (const radio of await radios.all()) await expect(radio).not.toBeChecked();
+  expect(mocks.state.saved.chooseAgain).toBe(true);
+
+  // Claude Code is the placeholder underneath, and a person can still choose it for real.
+  const claude = page.getByRole('radio', { name: /Claude Code/ });
+  await claude.check();
+  await expect.poll(() => mocks.state.saved.chooseAgain).toBe(false);
+  expect(chosenProvider(mocks.state.saved)).toBe('claudeCode');
+  await expect(claude).toBeChecked();
+  await expect(line).toHaveCount(0);
+  await expect(page.getByText(CLAUDE_CODE.sendsTo)).toBeVisible();
+});
+
+test('a prompt typed with no Provider chosen is still saved when a dropped file takes the screen away', async ({ page }) => {
+  const mocks = settingsMocks({ ...allProviders(), chooseAgain: true });
+  await installMockIpc(page, { ...empty, latest_roast: () => null, ...mocks.handlers, import_paths: () => ({ ...nothing, filesRead: 1, added: 5 }) });
+  await openSettings(page);
+
+  await page.getByRole('textbox', { name: 'System prompt' }).fill('Be gentle.');
+  await emitEvent(page, 'tauri://drag-drop', { paths: ['/d/first.zip'], position: { x: 9, y: 9 } });
+
+  await expect.poll(() => mocks.state.saved.systemPrompt).toBe('Be gentle.');
+  expect(mocks.state.saved.chooseAgain).toBe(true);
 });
 
 test('each Provider shows its status and a next step, and Check again asks again', async ({ page }) => {

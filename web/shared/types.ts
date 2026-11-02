@@ -127,11 +127,13 @@ export interface Settings {
   systemPrompt: string | null;
   /** Every other Provider, set up the way it was last left. */
   others: Provider[];
+  /** What was saved could not be read, so `provider` is a placeholder nobody chose, and no Roast can start until someone does. */
+  chooseAgain: boolean;
 }
 
 export interface Disclosure {
   sendsTo: string;
-  /** A local Provider on another computer, so `sendsTo` is a warning. */
+  /** The Digest would not go where a local Provider suggests, or Rostery no longer knows where it should go, so `sendsTo` is a warning. */
   flagged: boolean;
 }
 
