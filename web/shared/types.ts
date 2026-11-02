@@ -1,4 +1,4 @@
-// Mirrors the Rust structs in crates/core/src/{model,digest,roast}.rs and universe/mod.rs, in camelCase.
+// Mirrors the Rust structs in crates/core/src/{model,llm,roast}.rs and universe/mod.rs, in camelCase.
 
 export type Source = 'spotify' | 'youtube';
 export type Origin = 'export' | 'api' | 'demo';
@@ -72,63 +72,6 @@ export interface Universe {
   galaxies: Galaxy[];
 }
 
-export interface BiggestDay {
-  date: string;
-  plays: number;
-  minutes: number;
-}
-
-export interface Repeat {
-  item: string;
-  creator: string;
-  times: number;
-  date: string;
-}
-
-export interface CreatorStat {
-  name: string;
-  minutes: number;
-  plays: number;
-  interests: string[];
-}
-
-export interface ItemStat {
-  title: string;
-  creator: string;
-  plays: number;
-}
-
-export interface SourceDigest {
-  plays: number;
-  minutes: number;
-  minutesAreEstimates: boolean;
-  creators: number;
-  items: number;
-  firstDay: string;
-  lastDay: string;
-  skipRatePercent: number;
-  lateNightPercent: number;
-  deletedVideos: number;
-  biggestDay: BiggestDay | null;
-  longestRepeat: Repeat | null;
-  topCreators: CreatorStat[];
-  topItems: ItemStat[];
-}
-
-export interface GalaxyDigest {
-  id: number;
-  name: string;
-  size: number;
-  members: string[];
-}
-
-export interface Digest {
-  today: string;
-  spotify: SourceDigest | null;
-  youtube: SourceDigest | null;
-  galaxies: GalaxyDigest[];
-}
-
 export interface Burn {
   title: string;
   body: string;
@@ -160,4 +103,43 @@ export interface StoredRoast {
   createdAt: number;
   providerLabel: string;
   roast: Roast;
+}
+
+export interface FinishedRoast {
+  /** Its `id` is 0 when it could not be saved. */
+  roast: StoredRoast;
+  /** The sentence to show when it could not be saved. */
+  notSaved: string | null;
+}
+
+export type LocalServer = 'ollama' | 'lmStudio';
+
+export type Provider =
+  | { claudeCode: { model: string | null } }
+  | { codex: { model: string | null } }
+  | { local: { server: LocalServer; baseUrl: string; model: string } };
+
+export type ProviderId = 'claude-code' | 'codex' | 'ollama' | 'lm-studio';
+
+export interface Settings {
+  provider: Provider;
+  /** The editable part of the system prompt, when it is not the default. */
+  systemPrompt: string | null;
+  /** Every other Provider, set up the way it was last left. */
+  others: Provider[];
+}
+
+export interface Disclosure {
+  sendsTo: string;
+  /** A local Provider on another computer, so `sendsTo` is a warning. */
+  flagged: boolean;
+}
+
+export interface ProviderStatus extends Disclosure {
+  id: ProviderId;
+  available: boolean;
+  signedIn: boolean;
+  /** One sentence, with the next step when something is missing. */
+  detail: string;
+  models: string[];
 }

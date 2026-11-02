@@ -1,10 +1,9 @@
 use rostery_core::{
-    demo,
-    digest::{self, Digest},
+    demo, digest,
     ingest::ImportSummary,
-    llm::{self, Provider},
+    llm::{self, Disclosure, ProviderStatus, Settings},
     model::Totals,
-    roast::{self, StoredRoast},
+    roast::{self, FinishedRoast, StoredRoast},
     store::Store,
     universe::{self, Universe, UniverseFilter, UniverseInput},
     Error,
@@ -21,7 +20,7 @@ pub struct AppState {
     pub roast_running: Mutex<()>,
 }
 
-/// A CLI says nothing until it is done, so these only keep the person company while it works.
+/// A Provider says nothing until it is done, so these only keep the person company while it works.
 const WAITING: [&str; 5] = [
     "Reading your Digest",
     "Going through your late nights",
@@ -30,6 +29,9 @@ const WAITING: [&str; 5] = [
     "Still going. A long history takes a while.",
 ];
 const WAITING_EVERY: Duration = Duration::from_secs(15);
+/// A finished Roast cost someone minutes, and an import is what a person looks at while they wait. So
+/// its one save outlasts any import, where everything else gets the usual 5 seconds.
+const SAVE_WAIT: Duration = Duration::from_secs(120);
 
 fn now() -> i64 {
     SystemTime::now()
@@ -86,7 +88,7 @@ pub fn get_universe(state: State<'_, AppState>, filter: UniverseFilter) -> Resul
     ))
 }
 
-fn run_roast(state: &AppState, progress: impl Fn(&str) + Sync) -> Result<StoredRoast, Error> {
+fn run_roast(state: &AppState, progress: impl Fn(&str) + Sync) -> Result<FinishedRoast, Error> {
     // A Roast that panicked is over, so its poisoned lock does not count as one running.
     let _running =
         match state.roast_running.try_lock() {
@@ -100,9 +102,11 @@ fn run_roast(state: &AppState, progress: impl Fn(&str) + Sync) -> Result<StoredR
         };
     progress("Reading your history");
     let store = Store::open(&state.db_path)?;
+    // Read once, here, so changing Settings during a Roast only changes the next one.
+    let settings = Settings::load(&store)?;
+    let provider = &settings.provider;
     let from_demo = store.has_demo_data()?;
     let digest = digest::from_store(&store, now())?;
-    let provider = Provider::ClaudeCode { model: None };
     let (finished, waiting) = mpsc::channel::<()>();
     let roast = std::thread::scope(|scope| {
         let progress = &progress;
@@ -114,28 +118,35 @@ fn run_roast(state: &AppState, progress: impl Fn(&str) + Sync) -> Result<StoredR
                 }
             }
         });
-        let roast = roast::generate(
-            &provider,
-            &digest,
-            roast::default_system_prompt(),
-            llm::DEFAULT_TIMEOUT,
-        );
+        let roast = roast::generate(provider, &digest, settings.voice(), provider.timeout());
         drop(finished);
         roast
-    })?;
+    })
+    .map_err(|e| with_what_is_left(e, &store))?;
     // Sources stays usable during a Roast, so the demo this one is about can leave before it lands.
-    if from_demo && !store.has_demo_data()? {
+    // One that cannot be read here is no reason to lose the Roast, and the save below will say so.
+    if from_demo && matches!(store.has_demo_data(), Ok(false)) {
         return Err(Error::Provider(
             "Your history changed while this Roast was being written, so Rostery did not keep it. \
              Press Roast me to write one about what is stored now."
                 .to_owned(),
         ));
     }
-    store.save_roast(provider.label(), &roast, now(), from_demo)
+    Ok(store.keep_roast(provider.label(), roast, now(), from_demo, SAVE_WAIT))
+}
+
+/// Only said when it is so, because a first Roast has no last one.
+fn with_what_is_left(e: Error, store: &Store) -> Error {
+    match e {
+        Error::Provider(message) if matches!(store.latest_roast(), Ok(Some(_))) => {
+            Error::Provider(format!("{message} Your last Roast is unchanged."))
+        }
+        e => e,
+    }
 }
 
 #[tauri::command(async)]
-pub fn generate_roast(app: AppHandle, state: State<'_, AppState>) -> Result<StoredRoast, Error> {
+pub fn generate_roast(app: AppHandle, state: State<'_, AppState>) -> Result<FinishedRoast, Error> {
     run_roast(&state, |phrase| {
         // Only the words on screen are lost if this fails, and the Roast goes on.
         let _ = app.emit("roast-progress", phrase);
@@ -147,15 +158,47 @@ pub fn latest_roast(state: State<'_, AppState>) -> Result<Option<StoredRoast>, E
     Store::open(&state.db_path)?.latest_roast()
 }
 
+/// The exact Digest a Roast would send right now, or nothing when there is no history to send.
 #[tauri::command(async)]
-pub fn digest_preview(state: State<'_, AppState>) -> Result<Digest, Error> {
-    digest::from_store(&Store::open(&state.db_path)?, now())
+pub fn digest_preview(state: State<'_, AppState>) -> Result<Option<String>, Error> {
+    digest::from_store(&Store::open(&state.db_path)?, now())?.preview()
+}
+
+/// Spawns CLIs and calls the network, so it stays off the main thread and the screen does not wait on it.
+#[tauri::command(async)]
+pub fn provider_statuses(state: State<'_, AppState>) -> Result<Vec<ProviderStatus>, Error> {
+    let settings = Settings::load(&Store::open(&state.db_path)?)?;
+    Ok(llm::statuses(&settings))
+}
+
+/// Where the next Roast would go, from what is saved. It spawns nothing, so the Roast screen can have
+/// it before it offers the button.
+#[tauri::command(async)]
+pub fn provider_disclosure(state: State<'_, AppState>) -> Result<Disclosure, Error> {
+    let settings = Settings::load(&Store::open(&state.db_path)?)?;
+    Ok(llm::disclosure(&settings.provider))
+}
+
+#[tauri::command(async)]
+pub fn get_settings(state: State<'_, AppState>) -> Result<Settings, Error> {
+    Settings::load(&Store::open(&state.db_path)?)
+}
+
+#[tauri::command(async)]
+pub fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<Settings, Error> {
+    settings.save(&Store::open(&state.db_path)?)
+}
+
+#[tauri::command]
+pub fn default_system_prompt() -> &'static str {
+    roast::default_system_prompt()
 }
 
 // Debug only, because a release build ignores the override and would call the real CLI.
 #[cfg(all(test, debug_assertions))]
 mod tests {
     use super::*;
+    use rostery_core::llm::Provider;
     use rostery_core::model::{Origin, Play, Source};
     use std::os::unix::fs::PermissionsExt;
     use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -166,6 +209,8 @@ mod tests {
     const REPLY: &str = r#"{"type":"result","is_error":false,"result":"{\"headline\":\"Heard\",\"opening\":\"You.\",\"burns\":[{\"title\":\"Burn\",\"body\":\"Ouch.\"}],\"verdict\":{\"archetype\":\"Night Clerk\",\"score\":40,\"sentence\":\"Sit down.\"}}"}"#;
     const REFUSED: &str = r#"{"type":"result","is_error":true,"result":"Usage limit reached"}"#;
     const CAT_REPLY: &str = "cat \"$here/reply\"";
+    /// One argument per line, in a file beside the fake.
+    const RECORD_ARGV: &str = "printf '%s\\n' \"$@\" > \"$here/argv\"";
 
     /// These point the Provider at a fake `claude` through the environment, so one runs at a time.
     static ENV: Mutex<()> = Mutex::new(());
@@ -220,6 +265,16 @@ mod tests {
                 .map_or(0, |calls| calls.lines().count())
         }
 
+        fn save(&self, settings: Settings) {
+            settings
+                .save(&Store::open(&self.state.db_path).unwrap())
+                .unwrap();
+        }
+
+        fn argv(&self) -> String {
+            std::fs::read_to_string(self.dir.path().join("argv")).unwrap()
+        }
+
         fn latest(&self) -> Option<StoredRoast> {
             Store::open(&self.state.db_path)
                 .unwrap()
@@ -238,7 +293,8 @@ mod tests {
         let saved = run_roast(&rig.state, |phrase| {
             said.lock().unwrap().push(phrase.to_owned())
         })
-        .unwrap();
+        .unwrap()
+        .roast;
 
         assert_eq!(saved.roast.headline, "Heard");
         assert_eq!(saved.provider_label, "Claude Code");
@@ -272,7 +328,7 @@ mod tests {
             assert_eq!(rig.calls(), 1, "the second must not start a CLI");
 
             std::fs::write(&go, "").unwrap();
-            assert_eq!(first.join().unwrap().unwrap().roast.headline, "Heard");
+            assert_eq!(first.join().unwrap().unwrap().roast.roast.headline, "Heard");
         });
 
         // It is over, so another may start.
@@ -283,13 +339,30 @@ mod tests {
     #[test]
     fn a_failed_roast_keeps_the_last_one() {
         let rig = Rig::with_history(CAT_REPLY, REPLY);
-        let saved = run_roast(&rig.state, silent).unwrap();
+        let saved = run_roast(&rig.state, silent).unwrap().roast;
 
         rig.reply(REFUSED);
         let message = run_roast(&rig.state, silent).unwrap_err().to_string();
 
         assert!(message.contains("Usage limit reached"), "{message}");
+        assert!(
+            message.contains("Your last Roast is unchanged"),
+            "{message}"
+        );
         assert_eq!(rig.latest(), Some(saved));
+    }
+
+    #[test]
+    fn a_first_roast_that_fails_says_nothing_of_a_last_one() {
+        for reply in [
+            REFUSED,
+            r#"{"type":"result","is_error":false,"result":"no JSON here"}"#,
+        ] {
+            let rig = Rig::with_history(CAT_REPLY, reply);
+            let message = run_roast(&rig.state, silent).unwrap_err().to_string();
+            assert!(!message.contains("last Roast"), "{message}");
+            assert_eq!(rig.latest(), None);
+        }
     }
 
     #[test]
@@ -321,7 +394,7 @@ mod tests {
                 skipped: false,
             }])
             .unwrap();
-        let saved = run_roast(&rig.state, silent).unwrap();
+        let saved = run_roast(&rig.state, silent).unwrap().roast;
 
         demo::clear(&mut store).unwrap();
 
@@ -364,6 +437,82 @@ mod tests {
         assert!(message.contains("nothing to roast yet"), "{message}");
         assert_eq!(rig.calls(), 0);
         assert_eq!(rig.latest(), None);
+    }
+
+    #[test]
+    fn a_roast_uses_the_provider_and_voice_in_settings_and_says_so() {
+        let rig = Rig::with_history(&format!("{RECORD_ARGV}\n{CAT_REPLY}"), REPLY);
+        rig.save(Settings {
+            provider: Provider::ClaudeCode {
+                model: Some("haiku".into()),
+            },
+            system_prompt: Some("Speak only of soup.".into()),
+            others: Vec::new(),
+        });
+
+        let saved = run_roast(&rig.state, silent).unwrap().roast;
+
+        assert_eq!(saved.provider_label, "Claude Code");
+        let argv = rig.argv();
+        assert!(argv.contains("haiku"), "{argv}");
+        assert!(argv.contains("Speak only of soup."), "{argv}");
+        assert!(
+            argv.contains("galaxy_names"),
+            "the fixed part is still there: {argv}"
+        );
+    }
+
+    #[test]
+    fn a_roast_goes_on_with_what_it_started_with_when_settings_change() {
+        let rig = Rig::with_history(
+            &format!(
+                "{RECORD_ARGV}\n\
+                 touch \"$here/started\"\n\
+                 while [ ! -e \"$here/go\" ]; do sleep 0.02; done\n\
+                 cat \"$here/reply\""
+            ),
+            REPLY,
+        );
+        rig.save(Settings {
+            system_prompt: Some("The first voice.".into()),
+            ..Settings::default()
+        });
+        let (started, go) = (rig.dir.path().join("started"), rig.dir.path().join("go"));
+
+        std::thread::scope(|scope| {
+            let run = scope.spawn(|| run_roast(&rig.state, silent));
+            let until = Instant::now() + Duration::from_secs(10);
+            while !started.exists() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(started.exists(), "the Roast never began");
+
+            rig.save(Settings {
+                provider: Provider::Codex { model: None },
+                system_prompt: Some("The second voice.".into()),
+                others: Vec::new(),
+            });
+            std::fs::write(&go, "").unwrap();
+
+            let saved = run.join().unwrap().unwrap().roast;
+            assert_eq!(saved.provider_label, "Claude Code");
+        });
+        let argv = rig.argv();
+        assert!(argv.contains("The first voice."), "{argv}");
+        assert!(!argv.contains("The second voice."), "{argv}");
+    }
+
+    #[test]
+    fn settings_that_are_refused_change_nothing_a_roast_reads() {
+        let rig = Rig::new(CAT_REPLY);
+        let store = Store::open(&rig.state.db_path).unwrap();
+        let before = Settings::load(&store).unwrap();
+        let refused = Settings {
+            system_prompt: Some("x".repeat(llm::MAX_SYSTEM_PROMPT_CHARS + 1)),
+            ..Settings::default()
+        };
+        assert!(refused.save(&store).is_err());
+        assert_eq!(Settings::load(&store).unwrap(), before);
     }
 
     #[test]

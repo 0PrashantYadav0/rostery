@@ -1,5 +1,8 @@
 <script lang="ts">
+  import { tick } from 'svelte';
+  import { roastRun as run } from './roast-run.svelte';
   import Roast from './screens/Roast.svelte';
+  import Settings from './screens/Settings.svelte';
   import Sources from './screens/Sources.svelte';
   import Universe from './screens/Universe.svelte';
 
@@ -9,7 +12,7 @@
     { label: 'Universe', ready: true },
     { label: 'Roast', ready: true },
     { label: 'Share', ready: false },
-    { label: 'Settings', ready: false },
+    { label: 'Settings', ready: true },
   ];
 
   let screen = $state('Sources');
@@ -18,6 +21,18 @@
   let stored = $state(0);
   let missedError = $state('');
   let scroller = $state<HTMLElement>();
+  let nav = $state<HTMLElement>();
+
+  // The Roast screen tells people to look around while they wait, so the rail says how it is going.
+  const roastMark = $derived(
+    run.running
+      ? { kind: 'running', words: 'A Roast is being written.' }
+      : run.outcome === 'ready'
+        ? { kind: 'ready', words: 'Your Roast is ready.' }
+        : run.outcome === 'failed'
+          ? { kind: 'failed', words: 'That Roast did not finish. Open this screen to see why.' }
+          : null,
+  );
 
   function open(label: string) {
     screen = label;
@@ -26,10 +41,17 @@
     // Every screen shares one scroller, so the next one would otherwise open at this one's offset.
     if (scroller) scroller.scrollTop = 0;
   }
+
+  async function goToSources() {
+    open('Sources');
+    await tick();
+    // The button that was pressed is gone, and focus would otherwise fall to the page.
+    nav?.querySelector<HTMLElement>('[aria-current="page"]')?.focus();
+  }
 </script>
 
 <div class="shell">
-  <nav aria-label="Main">
+  <nav aria-label="Main" bind:this={nav}>
     <p class="mark">Rostery</p>
     <ul>
       {#each rail as { label, ready }}
@@ -39,16 +61,21 @@
             tabindex="0"
             disabled={!ready}
             aria-current={label === screen ? 'page' : undefined}
-            title={ready ? undefined : 'Not available yet'}
+            title={ready ? (label === 'Roast' ? roastMark?.words : undefined) : 'Not available yet'}
             onclick={() => open(label)}
           >
             {label}
+            {#if label === 'Roast' && roastMark}
+              <span class="pip {roastMark.kind}" aria-hidden="true">{roastMark.kind === 'failed' ? '!' : ''}</span>
+            {/if}
           </button>
         </li>
       {/each}
     </ul>
   </nav>
-  <main bind:this={scroller}>
+  <!-- A tab stop, because a long Roast has nothing else to hold focus while it scrolls by keyboard. -->
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+  <main tabindex="0" bind:this={scroller}>
     <!-- Sources stays mounted, so an import keeps its place and its result while you look elsewhere. -->
     <Sources
       active={screen === 'Sources'}
@@ -60,7 +87,9 @@
     {#if screen === 'Universe'}
       <Universe {importing} {missedError} {stored} />
     {:else if screen === 'Roast'}
-      <Roast {importing} {missedError} {stored} onsources={() => open('Sources')} />
+      <Roast {importing} {missedError} {stored} onsources={goToSources} />
+    {:else if screen === 'Settings'}
+      <Settings />
     {/if}
   </main>
 </div>
@@ -133,9 +162,56 @@
     cursor: default;
   }
 
+  /* A small mark beside the name. A failure has its own shape, so it does not rest on colour alone. */
+  .pip {
+    display: inline-block;
+    margin-left: 6px;
+    vertical-align: 1px;
+  }
+
+  .pip.running,
+  .pip.ready {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+  }
+
+  .pip.running {
+    border: 1.5px solid var(--brass);
+    animation: waiting 1.6s ease-in-out infinite;
+  }
+
+  .pip.ready {
+    background: var(--brass);
+  }
+
+  .pip.failed {
+    color: #f08a7e;
+    font-weight: 700;
+    line-height: 1;
+    vertical-align: baseline;
+  }
+
+  @keyframes waiting {
+    50% {
+      opacity: 0.35;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .pip.running {
+      animation: none;
+    }
+  }
+
   main {
     overflow: auto;
     background: radial-gradient(ellipse 80% 60% at 70% 0%, #172036, transparent 70%);
+  }
+
+  /* Inside its own edge, because the window clips anything outside. */
+  main:focus-visible {
+    outline-offset: -2px;
   }
 
   @media (max-width: 720px) {

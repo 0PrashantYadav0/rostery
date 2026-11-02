@@ -41,7 +41,12 @@ fn main() {
             commands::get_universe,
             commands::generate_roast,
             commands::latest_roast,
-            commands::digest_preview
+            commands::digest_preview,
+            commands::provider_statuses,
+            commands::provider_disclosure,
+            commands::get_settings,
+            commands::save_settings,
+            commands::default_system_prompt
         ])
         .build(tauri::generate_context!())
         .expect("Rostery could not start")

@@ -1,9 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import { Color } from 'three';
-import { emitEvent, installMockIpc } from './mock-ipc';
+import { CLAUDE_CODE, emitEvent, installMockIpc } from './mock-ipc';
 import { galaxyColor } from '../web/universe/scene-data';
-import type { ImportSummary, Planet, Source, SourceTotals, StoredRoast, Totals, Universe, UniverseFilter } from '../web/shared/types';
+import type { ImportSummary, Planet, Provider, ProviderStatus, Settings, Source, SourceTotals, StoredRoast, Totals, Universe, UniverseFilter } from '../web/shared/types';
 
 const none: SourceTotals = { plays: 0, minutes: 0, creators: 0, firstPlay: null, lastPlay: null };
 
@@ -2219,7 +2219,7 @@ function controlledRoast() {
       return new Promise((resolve, reject) => {
         run.finish = (result = aRoast) => {
           run.saved = result;
-          resolve(result);
+          resolve({ roast: result, notSaved: null });
         };
         run.fail = (message) => reject(new Error(message));
       });
@@ -2281,7 +2281,7 @@ test('the last Roast is there when the screen opens', async ({ page }) => {
 });
 
 test('roast error keeps previous', async ({ page }) => {
-  const message = 'Claude Code is not logged in. Run `claude` in a terminal, log in with /login, then try again.';
+  const message = 'Claude Code is not logged in. Run claude in a terminal and log in with /login, then try again.';
   const run = controlledRoast();
   await installMockIpc(page, { ...withHistory, latest_roast: () => aRoast, generate_roast: run.handler });
   await openRoast(page);
@@ -2797,6 +2797,722 @@ test('every screen opens at its top, wherever the last one was scrolled to', asy
   await expect(page.getByRole('heading', { level: 1, name: 'Roast' })).toBeInViewport();
   await expect(roastButton(page)).toBeInViewport();
   expect(await scrolled()).toBe(0);
+});
+
+test('with no history but a stored Roast, the screen does not say there is nothing to roast', async ({ page }) => {
+  await installMockIpc(page, { ...empty, latest_roast: () => aRoast });
+  await openRoast(page);
+
+  await expect(page.getByRole('heading', { level: 2, name: aRoast.roast.headline })).toBeVisible();
+  await expect(page.getByText('There is nothing to roast yet.')).toHaveCount(0);
+  await expect(page.getByText('Add your history on the Sources screen to write a new Roast.')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Go to Sources' })).toBeVisible();
+});
+
+test('an old error goes when the history it was about does', async ({ page }) => {
+  let demo = true;
+  const nothingStored: Totals = { spotify: none, youtube: none };
+  await installMockIpc(page, {
+    totals: () => (demo ? someHistory : nothingStored),
+    has_demo_data: () => demo,
+    latest_roast: () => null,
+    generate_roast: () => {
+      throw new Error('Claude Code is not logged in.');
+    },
+    clear_demo: () => {
+      demo = false;
+      return nothingStored;
+    },
+  });
+  await openRoast(page);
+  await roastButton(page).click();
+  await expect(page.getByRole('alert')).toHaveText('Claude Code is not logged in.');
+
+  await page.getByRole('button', { name: 'Sources', exact: true }).click();
+  await page.getByRole('button', { name: 'Clear demo data' }).click();
+  await expect(page.getByRole('button', { name: 'Clear demo data' })).toBeHidden();
+  await page.getByRole('button', { name: 'Roast', exact: true }).click();
+
+  await expect(page.getByText('There is nothing to roast yet.')).toBeVisible();
+  await expect(page.locator('main [role="alert"]:visible')).toHaveCount(0);
+});
+
+test('Go to Sources keeps keyboard focus', async ({ page }) => {
+  await installMockIpc(page, { ...empty, latest_roast: () => null });
+  await openRoast(page);
+  await page.getByRole('button', { name: 'Go to Sources' }).focus();
+  await page.keyboard.press('Enter');
+
+  await expect(page.getByRole('heading', { level: 1, name: 'Sources' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Sources', exact: true })).toBeFocused();
+});
+
+test('right to left Burns and evidence start at the right', async ({ page }) => {
+  const arabic = 'مرحبا بالعالم';
+  const roast = {
+    ...aRoast,
+    roast: {
+      ...aRoast.roast,
+      burns: [{ title: arabic, body: arabic }],
+      verdict: { ...aRoast.roast.verdict, evidence: [arabic] },
+    },
+  };
+  await installMockIpc(page, { ...withHistory, latest_roast: () => roast });
+  await openRoast(page);
+  await expect(page.getByRole('region', { name: 'Verdict' })).toBeVisible();
+
+  for (const selector of ['.burns h3', '.burns p', '.verdict ul li']) {
+    const node = page.locator(selector).first();
+    // WebKit's `li` alignment comes from the parent's direction unless told otherwise.
+    await expect(node, selector).not.toHaveCSS('text-align', 'left');
+    await expect(node, selector).toHaveCSS('direction', 'rtl');
+  }
+});
+
+test('while totals load there is a word about it, and nothing jumps when they arrive', async ({ page }) => {
+  let answer = (_: Totals) => {};
+  await installMockIpc(page, {
+    has_demo_data: () => false,
+    latest_roast: () => aRoast,
+    totals: () => new Promise((resolve) => (answer = resolve)),
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Roast', exact: true }).click();
+
+  const status = page.locator('main').getByRole('status').filter({ hasText: 'Looking at what is stored' });
+  await expect(status).toBeVisible();
+  // The Roast waits for the button above it, so the button cannot push it down.
+  await expect(page.locator('article')).toHaveCount(0);
+
+  answer(someHistory);
+  const article = page.locator('article');
+  await expect(article).toBeVisible();
+  await expect(status).toHaveCount(0);
+  const top = (await article.boundingBox())!.y;
+  await settled(page);
+  expect((await article.boundingBox())!.y).toBe(top);
+
+  // Coming back knows at once, with the button already over the Roast.
+  answer = () => {};
+  await page.getByRole('button', { name: 'Sources', exact: true }).click();
+  await page.getByRole('button', { name: 'Roast', exact: true }).click();
+  await expect(roastButton(page)).toBeVisible();
+  await expect(article).toBeVisible();
+  expect((await article.boundingBox())!.y).toBe(top);
+});
+
+test('the sweep of the running dial goes round with no gap in the loop', async ({ page }) => {
+  const run = controlledRoast();
+  await installMockIpc(page, { ...withHistory, generate_roast: run.handler });
+  await openRoast(page);
+  await roastButton(page).click();
+  await expect.poll(() => run.calls).toBe(1);
+
+  // The sweep moves the dash by 100, so the dash and its gap have to repeat every 100.
+  const dash = await page
+    .locator('.progress .arc')
+    .evaluate((arc) => getComputedStyle(arc).strokeDasharray.split(',').map((part) => parseFloat(part)));
+  expect(dash).toEqual([18, 82]);
+});
+
+test('a long Roast scrolls by keyboard', async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 400 });
+  await installMockIpc(page, { ...withHistory, latest_roast: () => aRoast });
+  await openRoast(page);
+  await expect(page.getByRole('region', { name: 'Verdict' })).toBeAttached();
+
+  const main = page.locator('main');
+  await expect(main).toHaveAttribute('tabindex', '0');
+  await main.focus();
+  await expect(main).toBeFocused();
+  await page.keyboard.press('End');
+  await expect.poll(() => main.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
+});
+
+test('the rail shows a Roast running, then how it ended, until you go and look', async ({ page }) => {
+  const run = controlledRoast();
+  await installMockIpc(page, { ...withHistory, generate_roast: run.handler, latest_roast: () => run.saved });
+  await openRoast(page);
+  const rail = page.getByRole('button', { name: 'Roast', exact: true });
+  const mark = rail.locator('.pip');
+  await expect(mark).toHaveCount(0);
+
+  await roastButton(page).click();
+  await expect.poll(() => run.calls).toBe(1);
+  await expect(mark).toHaveClass(/running/);
+  await expect(rail).toHaveAttribute('title', 'A Roast is being written.');
+
+  await page.getByRole('button', { name: 'Sources', exact: true }).click();
+  await expect(mark).toHaveClass(/running/);
+  run.finish();
+  await expect(mark).toHaveClass(/ready/);
+  await expect(rail).toHaveAttribute('title', 'Your Roast is ready.');
+
+  await rail.click();
+  await expect(page.getByRole('heading', { level: 2, name: aRoast.roast.headline })).toBeVisible();
+  await expect(mark).toHaveCount(0);
+  await expect(rail).not.toHaveAttribute('title');
+
+  // A failure away from the screen is the one nothing else would show.
+  await roastButton(page).click();
+  await expect.poll(() => run.calls).toBe(2);
+  await page.getByRole('button', { name: 'Sources', exact: true }).click();
+  run.fail('Claude Code did not finish.');
+  await expect(mark).toHaveClass(/failed/);
+  await expect(rail).toHaveAttribute('title', 'That Roast did not finish. Open this screen to see why.');
+
+  await rail.click();
+  await expect(page.getByRole('alert')).toHaveText('Claude Code did not finish.');
+  await expect(mark).toHaveCount(0);
+});
+
+test('a Roast that ends in plain sight leaves no mark behind, and a failure is brought into view', async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 500 });
+  const run = controlledRoast();
+  await installMockIpc(page, { ...withHistory, generate_roast: run.handler, latest_roast: () => aRoast });
+  await openRoast(page);
+  await roastButton(page).click();
+  await expect.poll(() => run.calls).toBe(1);
+
+  // Reading the last Roast further down while the new one is written.
+  await page.locator('main').evaluate((el) => (el.scrollTop = 100_000));
+  run.fail('Claude Code did not finish.');
+
+  await expect(page.getByRole('alert')).toBeInViewport();
+  await expect(page.getByRole('button', { name: 'Roast', exact: true }).locator('.pip')).toHaveCount(0);
+});
+
+test('a finished Roast that could not be saved still shows, and says so', async ({ page }) => {
+  const note = 'This Roast was not saved, so it will be gone when you close Rostery. Rostery could not use its local database: database is locked. Close any other copy of Rostery and try again.';
+  const older: StoredRoast = { ...aRoast, id: 1, roast: { ...aRoast.roast, headline: 'An Older One' } };
+  await installMockIpc(page, {
+    ...withHistory,
+    latest_roast: () => older,
+    generate_roast: () => ({ roast: { ...aRoast, id: 0 }, notSaved: note }),
+  });
+  await openRoast(page);
+  await expect(page.getByRole('heading', { level: 2, name: 'An Older One' })).toBeVisible();
+
+  await roastButton(page).click();
+
+  await expect(page.getByRole('heading', { level: 2, name: aRoast.roast.headline })).toBeVisible();
+  await expect(page.getByRole('alert')).toHaveText(note);
+
+  // The database only knows the older one, and that must not take its place while the app is open.
+  await page.getByRole('button', { name: 'Sources', exact: true }).click();
+  await page.getByRole('button', { name: 'Roast', exact: true }).click();
+  await expect(page.getByRole('heading', { level: 2, name: aRoast.roast.headline })).toBeVisible();
+  await expect(page.getByRole('alert')).toHaveText(note);
+});
+
+for (const [sendsTo, flagged] of [
+  ['Your Digest goes to OpenAI through Codex.', false],
+  ['Your Digest stays on this computer. It goes to Ollama here.', false],
+  ['Warning: 192.168.1.5 is not this computer, so your Digest leaves this computer and goes there.', true],
+] as const) {
+  test(`the Roast screen says where the Digest goes: ${sendsTo}`, async ({ page }) => {
+    await installMockIpc(page, { ...withHistory, provider_disclosure: () => ({ sendsTo, flagged }) });
+    await openRoast(page);
+
+    const line = page.getByText(sendsTo);
+    await expect(line).toBeVisible();
+    if (flagged) await expect(line).toHaveClass(/flagged/);
+    else await expect(line).not.toHaveClass(/flagged/);
+    await expect(page.getByText(DISCLOSURE)).toHaveCount(0);
+  });
+}
+
+test('with nothing to say where a Digest goes, there is no button to send it', async ({ page }) => {
+  await installMockIpc(page, {
+    ...withHistory,
+    provider_disclosure: () => {
+      throw new Error('Rostery could not use its local database.');
+    },
+  });
+  await openRoast(page);
+
+  await expect(page.locator('main [role="alert"]:visible')).toContainText('could not use its local database');
+  await expect(roastButton(page)).toHaveCount(0);
+});
+
+test('a running Roast goes on saying where it went after Settings change', async ({ page }) => {
+  const run = controlledRoast();
+  let disclosure = CLAUDE_CODE;
+  const codex = { sendsTo: 'Your Digest goes to OpenAI through Codex.', flagged: false };
+  await installMockIpc(page, { ...settingsMocks().handlers, ...withHistory, generate_roast: run.handler, provider_disclosure: () => disclosure });
+  await openRoast(page);
+  await roastButton(page).click();
+  await expect.poll(() => run.calls).toBe(1);
+
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(page.getByText('A Roast is running.')).toBeVisible();
+  disclosure = codex;
+  await page.getByRole('radio', { name: /Codex/ }).check();
+  await expect(page.getByText(codex.sendsTo)).toBeVisible();
+
+  await page.getByRole('button', { name: 'Roast', exact: true }).click();
+  await expect(page.getByText(CLAUDE_CODE.sendsTo)).toBeVisible();
+  await expect(page.getByText(codex.sendsTo)).toHaveCount(0);
+
+  run.finish();
+  await expect(page.getByText(codex.sendsTo)).toBeVisible();
+});
+
+const defaultVoice = 'You are the roastmaster.';
+const allProviders = (): Settings => ({
+  provider: { claudeCode: { model: null } },
+  systemPrompt: null,
+  others: [
+    { codex: { model: null } },
+    { local: { server: 'ollama', baseUrl: 'http://127.0.0.1:11434/v1', model: '' } },
+    { local: { server: 'lmStudio', baseUrl: 'http://127.0.0.1:1234/v1', model: '' } },
+  ],
+});
+const statusOf = (id: ProviderStatus['id'], rest: Partial<ProviderStatus> = {}): ProviderStatus => ({
+  id,
+  available: true,
+  signedIn: true,
+  detail: 'Logged in.',
+  sendsTo: `Your Digest goes somewhere through ${id}.`,
+  flagged: false,
+  models: [],
+  ...rest,
+});
+const everyStatus: ProviderStatus[] = [
+  statusOf('claude-code'),
+  statusOf('codex', { signedIn: false, detail: 'Not logged in. Run codex login in a terminal, then check again.' }),
+  statusOf('ollama', { available: false, detail: 'Not running at http://127.0.0.1:11434/v1. Install Ollama from ollama.com or start it with ollama serve, then check again.' }),
+  statusOf('lm-studio', { detail: 'Running at http://127.0.0.1:1234/v1, with 2 models.', models: ['tiny-model', 'big-model'] }),
+];
+
+/** A store that keeps what is saved, the way Rust does, and answers the rest of the Settings screen. */
+function settingsMocks(start: Settings = allProviders()) {
+  const state = { saved: start, saves: [] as Settings[] };
+  const handlers = {
+    get_settings: () => state.saved,
+    save_settings: ({ settings }: { settings: Settings }) => {
+      state.saves.push(settings);
+      state.saved = settings;
+      return settings;
+    },
+    provider_statuses: () => everyStatus,
+    default_system_prompt: () => defaultVoice,
+    digest_preview: () => '{\n  "today": "2027-01-15"\n}',
+  };
+  return { state, handlers };
+}
+
+async function openSettings(page: Page) {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(page.getByRole('heading', { level: 1, name: 'Settings' })).toBeVisible();
+}
+
+const chosenProvider = (settings: Settings) => Object.keys(settings.provider)[0];
+const providerOf = (settings: Settings, key: string) => [settings.provider, ...settings.others].find((p) => key in p) as Provider;
+
+test('provider choice persists', async ({ page }) => {
+  const mocks = settingsMocks();
+  await installMockIpc(page, { ...empty, latest_roast: () => null, ...mocks.handlers });
+  await openSettings(page);
+
+  const codex = page.getByRole('radio', { name: /Codex/ });
+  await expect(page.getByRole('radio', { name: /Claude Code/ })).toBeChecked();
+  await codex.check();
+  await expect.poll(() => mocks.state.saves.length).toBe(1);
+  expect(chosenProvider(mocks.state.saved)).toBe('codex');
+  // Nothing about the others was thrown away to make that choice.
+  expect([mocks.state.saved.provider, ...mocks.state.saved.others]).toHaveLength(4);
+
+  // Away and back, and across a whole reload.
+  await page.getByRole('button', { name: 'Sources', exact: true }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(codex).toBeChecked();
+  await openSettings(page);
+  await expect(codex).toBeChecked();
+});
+
+test('each Provider shows its status and a next step, and Check again asks again', async ({ page }) => {
+  let statuses = everyStatus;
+  let asked = 0;
+  await installMockIpc(page, {
+    ...empty,
+    latest_roast: () => null,
+    ...settingsMocks().handlers,
+    provider_statuses: () => {
+      asked += 1;
+      return statuses;
+    },
+  });
+  await openSettings(page);
+
+  await expect(page.getByText('Logged in.', { exact: true })).toBeVisible();
+  await expect(page.getByText('Run codex login in a terminal, then check again.')).toBeVisible();
+  await expect(page.getByText('start it with ollama serve, then check again.')).toBeVisible();
+  await expect(page.getByText('with 2 models.')).toBeVisible();
+  expect(asked).toBe(1);
+
+  statuses = everyStatus.map((s) => (s.id === 'codex' ? { ...s, signedIn: true, detail: 'Logged in now.' } : s));
+  await page.getByRole('button', { name: 'Check again' }).click();
+  await expect(page.getByText('Logged in now.')).toBeVisible();
+  expect(asked).toBe(2);
+});
+
+test('a status check that never answers does not hold up the screen', async ({ page }) => {
+  const mocks = settingsMocks();
+  await installMockIpc(page, {
+    ...empty,
+    latest_roast: () => null,
+    ...mocks.handlers,
+    provider_statuses: () => new Promise(() => {}),
+  });
+  await openSettings(page);
+
+  await expect(page.getByText('Checking')).toHaveCount(4);
+  await page.getByRole('radio', { name: /Codex/ }).check();
+  await expect.poll(() => chosenProvider(mocks.state.saved)).toBe('codex');
+  await expect(page.getByRole('textbox', { name: 'System prompt' })).toHaveValue(defaultVoice);
+  await page.getByRole('button', { name: 'See what gets sent' }).click();
+  await expect(page.getByRole('dialog')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Sources', exact: true }).click();
+  await expect(page.getByRole('heading', { level: 1, name: 'Sources' })).toBeVisible();
+});
+
+test('a status check that fails says why, and the rest of the screen still works', async ({ page }) => {
+  await installMockIpc(page, {
+    ...empty,
+    latest_roast: () => null,
+    ...settingsMocks().handlers,
+    provider_statuses: () => {
+      throw new Error('Rostery could not use its local database.');
+    },
+  });
+  await openSettings(page);
+  await expect(page.locator('main [role="alert"]:visible')).toContainText('could not use its local database');
+  await expect(page.getByRole('radio', { name: /Codex/ })).toBeEnabled();
+});
+
+test('the model and address of a Provider are saved and survive trying another', async ({ page }) => {
+  const mocks = settingsMocks();
+  await installMockIpc(page, { ...empty, latest_roast: () => null, ...mocks.handlers });
+  await openSettings(page);
+
+  await page.getByRole('combobox', { name: 'Model' }).fill('haiku');
+  await page.getByRole('combobox', { name: 'Model' }).blur();
+  await expect.poll(() => providerOf(mocks.state.saved, 'claudeCode')).toEqual({ claudeCode: { model: 'haiku' } });
+
+  // A local server offers what it has, and the first one is chosen so a Roast can start.
+  await page.getByRole('radio', { name: /LM Studio/ }).check();
+  await expect(page.getByRole('combobox', { name: 'Model' })).toHaveValue('tiny-model');
+  await expect
+    .poll(() => providerOf(mocks.state.saved, 'local'))
+    .toEqual({ local: { server: 'lmStudio', baseUrl: 'http://127.0.0.1:1234/v1', model: 'tiny-model' } });
+  const options = page.locator('datalist option');
+  await expect(options).toHaveCount(2);
+  await expect(options.first()).toHaveAttribute('value', 'tiny-model');
+
+  const address = page.getByRole('textbox', { name: 'Server address' });
+  await expect(address).toHaveValue('http://127.0.0.1:1234/v1');
+  await address.fill('http://192.168.1.5:1234/v1');
+  await address.press('Enter');
+  await expect.poll(() => mocks.state.saves.some((s) => JSON.stringify(s.provider).includes('192.168.1.5'))).toBe(true);
+
+  // Trying another and coming back loses nothing.
+  await page.getByRole('radio', { name: /Claude Code/ }).check();
+  await expect(page.getByRole('combobox', { name: 'Model' })).toHaveValue('haiku');
+  await page.getByRole('radio', { name: /LM Studio/ }).check();
+  await expect(page.getByRole('textbox', { name: 'Server address' })).toHaveValue('http://192.168.1.5:1234/v1');
+});
+
+test('an address that is not local gets a warning that names the host', async ({ page }) => {
+  const mocks = settingsMocks();
+  const warning = 'Warning: 192.168.1.5 is not this computer, so your Digest leaves this computer and goes there.';
+  await installMockIpc(page, {
+    ...empty,
+    latest_roast: () => null,
+    ...mocks.handlers,
+    provider_disclosure: () =>
+      JSON.stringify(mocks.state.saved.provider).includes('192.168.1.5') ? { sendsTo: warning, flagged: true } : CLAUDE_CODE,
+  });
+  await openSettings(page);
+  await expect(page.getByText(CLAUDE_CODE.sendsTo)).toBeVisible();
+
+  await page.getByRole('radio', { name: /Ollama/ }).check();
+  const address = page.getByRole('textbox', { name: 'Server address' });
+  await address.fill('http://192.168.1.5:11434/v1');
+  await address.blur();
+
+  const line = page.getByText(warning);
+  await expect(line).toBeVisible();
+  await expect(line.locator('..')).toHaveClass(/flagged/);
+});
+
+test('an address that is refused says why, and keeps what was typed', async ({ page }) => {
+  const mocks = settingsMocks();
+  const refused = 'Rostery cannot use the address "nope". It should look like http://127.0.0.1:11434/v1, with no name or password in it.';
+  await installMockIpc(page, {
+    ...empty,
+    latest_roast: () => null,
+    ...mocks.handlers,
+    save_settings: ({ settings }: { settings: Settings }) => {
+      if (JSON.stringify(settings).includes('nope')) throw new Error(refused);
+      mocks.state.saved = settings;
+      return settings;
+    },
+  });
+  await openSettings(page);
+  await page.getByRole('radio', { name: /Ollama/ }).check();
+  await expect(page.getByRole('textbox', { name: 'Server address' })).toBeVisible();
+  await expect.poll(() => chosenProvider(mocks.state.saved)).toBe('local');
+
+  const address = page.getByRole('textbox', { name: 'Server address' });
+  await address.fill('nope');
+  await address.blur();
+
+  await expect(page.getByRole('alert')).toHaveText(refused);
+  await expect(address).toHaveValue('nope');
+  expect(JSON.stringify(mocks.state.saved)).not.toContain('nope');
+
+  // A refused address does not get in the way of anything else.
+  await page.getByRole('textbox', { name: 'System prompt' }).fill('Be gentle.');
+  await page.getByRole('textbox', { name: 'System prompt' }).blur();
+  await expect.poll(() => mocks.state.saved.systemPrompt).toBe('Be gentle.');
+});
+
+test('digest preview opens', async ({ page }) => {
+  const digest = '{\n  "today": "2027-01-15",\n  "spotify": {\n    "plays": 944\n  }\n}';
+  await installMockIpc(page, { ...withHistory, ...settingsMocks().handlers, digest_preview: () => digest });
+  await openSettings(page);
+
+  const button = page.getByRole('button', { name: 'See what gets sent' });
+  await button.focus();
+  await page.keyboard.press('Enter');
+  const dialog = page.getByRole('dialog', { name: 'What gets sent' });
+  await expect(dialog).toBeVisible();
+  // Exactly what came from Rust, line for line.
+  expect(await dialog.locator('pre').evaluate((node) => node.textContent)).toBe(digest);
+
+  await dialog.getByRole('button', { name: 'Close' }).click();
+  await expect(dialog).toBeHidden();
+  await expect(button).toBeFocused();
+
+  await page.keyboard.press('Enter');
+  await expect(dialog).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await expect(button).toBeFocused();
+});
+
+test('with no history the preview says so, and a failure says why', async ({ page }) => {
+  let preview: () => unknown = () => null;
+  await installMockIpc(page, { ...withHistory, ...settingsMocks().handlers, digest_preview: () => preview() });
+  await openSettings(page);
+  await page.getByRole('button', { name: 'See what gets sent' }).click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.getByText('There is nothing to send yet.')).toBeVisible();
+  await expect(dialog.locator('pre')).toHaveCount(0);
+  await dialog.getByRole('button', { name: 'Close' }).click();
+
+  preview = () => {
+    throw new Error('Rostery could not use its local database.');
+  };
+  await page.getByRole('button', { name: 'See what gets sent' }).click();
+  await expect(dialog.getByRole('alert')).toContainText('could not use its local database');
+});
+
+test('a Digest with a hostile or very long title stays text and stays inside the dialog', async ({ page }) => {
+  const attack = '</pre><img src=x onerror=window.ran=1>';
+  const digest = JSON.stringify({ title: attack, long: 'w'.repeat(5000) }, null, 2);
+  await page.setViewportSize({ width: 640, height: 480 });
+  await installMockIpc(page, { ...withHistory, ...settingsMocks().handlers, digest_preview: () => digest });
+  await openSettings(page);
+  await page.getByRole('button', { name: 'See what gets sent' }).click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.locator('pre')).toContainText(attack);
+  await expect(dialog.locator('img')).toHaveCount(0);
+  expect(await page.evaluate(() => (window as any).ran)).toBeUndefined();
+
+  const sizes = await dialog.locator('pre').evaluate((node) => ({ scroll: node.scrollWidth, client: node.clientWidth }));
+  expect(sizes.scroll).toBeLessThanOrEqual(sizes.client);
+  const box = (await dialog.boundingBox())!;
+  expect(box.x).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width).toBeLessThanOrEqual(640);
+  expect(box.y + box.height).toBeLessThanOrEqual(480);
+});
+
+test('system prompt reset', async ({ page }) => {
+  const mocks = settingsMocks();
+  await installMockIpc(page, { ...withHistory, ...mocks.handlers });
+  await openSettings(page);
+
+  const box = page.getByRole('textbox', { name: 'System prompt' });
+  const reset = page.getByRole('button', { name: 'Reset to default' });
+  await expect(box).toHaveValue(defaultVoice);
+  await expect(reset).toHaveAttribute('aria-disabled', 'true');
+
+  await box.fill('Speak only of soup.');
+  await box.blur();
+  await expect.poll(() => mocks.state.saved.systemPrompt).toBe('Speak only of soup.');
+  await expect(page.getByText('Saved. The next Roast uses this.')).toBeVisible();
+
+  // The edit is still there on coming back.
+  await page.getByRole('button', { name: 'Sources', exact: true }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(box).toHaveValue('Speak only of soup.');
+
+  await reset.focus();
+  await page.keyboard.press('Enter');
+  await expect(box).toHaveValue(defaultVoice);
+  await expect.poll(() => mocks.state.saved.systemPrompt).toBe(null);
+  await expect(reset).toBeFocused();
+  await expect(page.getByText('Back to the default prompt.')).toBeVisible();
+
+  // A wrong press on Reset should not cost someone their long prompt.
+  await page.getByRole('button', { name: 'Undo' }).click();
+  await expect(box).toHaveValue('Speak only of soup.');
+  await expect.poll(() => mocks.state.saved.systemPrompt).toBe('Speak only of soup.');
+  await expect(page.getByRole('button', { name: 'Undo' })).toHaveCount(0);
+  // Its button is gone, so focus goes to the one beside it and not to the page.
+  await expect(reset).toBeFocused();
+
+  // Typing again makes what the last save said out of date.
+  await expect(page.getByText('Saved. The next Roast uses this.')).toBeVisible();
+  await box.fill('Speak only of soup, and of bread.');
+  await expect(page.getByText('Saved. The next Roast uses this.')).toHaveCount(0);
+});
+
+test('a system prompt that is too long says so, and what was typed stays to shorten', async ({ page }) => {
+  const mocks = settingsMocks();
+  const refused = 'That system prompt is 20001 characters long and the limit is 20000, so Rostery did not save it. Shorten it, or use Reset to go back to the default.';
+  await installMockIpc(page, {
+    ...withHistory,
+    ...mocks.handlers,
+    save_settings: ({ settings }: { settings: Settings }) => {
+      if ((settings.systemPrompt ?? '').length > 20_000) throw new Error(refused);
+      mocks.state.saved = settings;
+      return settings;
+    },
+  });
+  await openSettings(page);
+  const box = page.getByRole('textbox', { name: 'System prompt' });
+  const long = 'x'.repeat(20_001);
+  await box.fill(long);
+  await box.blur();
+
+  await expect(page.getByRole('alert')).toHaveText(refused);
+  await expect(box).toHaveValue(long);
+  expect(mocks.state.saved.systemPrompt).toBe(null);
+
+  // Choosing a Provider still works, and does not drag the refused text along.
+  await page.getByRole('radio', { name: /Codex/ }).check();
+  await expect.poll(() => chosenProvider(mocks.state.saved)).toBe('codex');
+  expect(mocks.state.saved.systemPrompt).toBe(null);
+
+  await page.getByRole('button', { name: 'Reset to default' }).click();
+  await expect(box).toHaveValue(defaultVoice);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
+test('a blank system prompt goes back to the default, and what is typed during a save stays', async ({ page }) => {
+  const mocks = settingsMocks();
+  let saves = 0;
+  let finish = () => {};
+  await installMockIpc(page, {
+    ...withHistory,
+    ...mocks.handlers,
+    save_settings: ({ settings }: { settings: Settings }) => {
+      saves += 1;
+      return new Promise((resolve) => {
+        finish = () => {
+          // Rust counts a blank prompt as none.
+          mocks.state.saved = { ...settings, systemPrompt: settings.systemPrompt?.trim() || null };
+          resolve(mocks.state.saved);
+        };
+      });
+    },
+  });
+  await openSettings(page);
+  const box = page.getByRole('textbox', { name: 'System prompt' });
+
+  await box.fill('First go.');
+  await box.blur();
+  await expect.poll(() => saves).toBe(1);
+  await box.fill('First go, and more.');
+  finish();
+  await expect(page.getByText('Saved. The next Roast uses this.')).toBeVisible();
+  await expect(box).toHaveValue('First go, and more.');
+
+  await box.blur();
+  await expect.poll(() => saves).toBe(2);
+  finish();
+  await expect.poll(() => mocks.state.saved.systemPrompt).toBe('First go, and more.');
+
+  await box.fill('   ');
+  await box.blur();
+  await expect.poll(() => saves).toBe(3);
+  finish();
+  await expect(box).toHaveValue(defaultVoice);
+  await expect(page.getByText('Back to the default prompt.')).toBeVisible();
+});
+
+test('an edit made just before leaving the screen is not lost', async ({ page }) => {
+  const mocks = settingsMocks();
+  await installMockIpc(page, { ...withHistory, ...mocks.handlers });
+  await openSettings(page);
+  await page.getByRole('textbox', { name: 'System prompt' }).fill('Speak only of soup.');
+
+  await page.getByRole('button', { name: 'Roast', exact: true }).click();
+
+  await expect.poll(() => mocks.state.saved.systemPrompt).toBe('Speak only of soup.');
+});
+
+test('Settings stays inside the window with a long status and prompt, and at every width', async ({ page }) => {
+  const long = `http://${'very-long-host-name.'.repeat(12)}example.test:11434/v1`;
+  const start = allProviders();
+  start.provider = { local: { server: 'ollama', baseUrl: long, model: 'w'.repeat(300) } };
+  start.others = [{ claudeCode: { model: null } }, { codex: { model: null } }, { local: { server: 'lmStudio', baseUrl: long, model: '' } }];
+  start.systemPrompt = 'w'.repeat(20_000);
+  await installMockIpc(page, {
+    ...withHistory,
+    ...settingsMocks(start).handlers,
+    provider_statuses: () => everyStatus.map((s) => ({ ...s, detail: `Not running at ${long}. Then check again.` })),
+    provider_disclosure: () => ({ sendsTo: `Warning: ${long} is not this computer.`, flagged: true }),
+  });
+  await openSettings(page);
+  await expect(page.getByText('Then check again.').first()).toBeVisible();
+
+  for (const width of [1200, 721, 720, 500, 320]) {
+    await page.setViewportSize({ width, height: 800 });
+    const problems = await page.evaluate(() => {
+      const main = document.querySelector('main')!;
+      const edge = main.getBoundingClientRect().right;
+      const past = [...main.querySelectorAll('h1, h2, p, label, input, textarea, button')].filter((node) => node.getBoundingClientRect().right > edge + 0.5);
+      return { sideways: main.scrollWidth - main.clientWidth, past: past.map((node) => node.tagName) };
+    });
+    expect(problems.sideways, `main scrolls sideways at ${width}px`).toBeLessThanOrEqual(0);
+    expect(problems.past, `something leaves the screen at ${width}px`).toEqual([]);
+  }
+});
+
+test('Tab reaches every control on Settings', async ({ page }) => {
+  await installMockIpc(page, { ...withHistory, ...settingsMocks().handlers });
+  await openSettings(page);
+  await expect(page.getByText('Logged in.', { exact: true })).toBeVisible();
+
+  const reached = new Set<string>();
+  for (let press = 0; press < 25; press += 1) {
+    await page.keyboard.press('Tab');
+    reached.add(
+      await page.evaluate(() => {
+        const el = document.activeElement as HTMLInputElement;
+        return el.tagName === 'BUTTON' ? el.innerText.trim() : el.tagName === 'INPUT' ? el.type : el.tagName;
+      }),
+    );
+  }
+  for (const name of ['Check again', 'radio', 'text', 'See what gets sent', 'TEXTAREA', 'Reset to default']) {
+    expect([...reached], `${name} was never reached`).toContain(name);
+  }
 });
 
 /** The name of everything Tab lands on, the way a WebKit webview really moves. */

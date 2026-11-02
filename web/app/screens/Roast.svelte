@@ -11,21 +11,22 @@
     onsources,
   }: { importing: boolean; missedError: string; stored: number; onsources: () => void } = $props();
 
-  let hasHistory = $state<boolean>();
   let problem = $state('');
   let ask = $state<HTMLElement>();
 
-  // The two are asked apart, because only history decides the button. A last Roast that cannot be read
-  // must not take away the way to write the one that replaces it. The last answer wins.
+  // The two are asked apart, because only history and where it would go decide the button. A last Roast
+  // that cannot be read must not take away the way to write the one that replaces it. The last answer wins.
   let latest = 0;
   async function check() {
     const asked = (latest += 1);
     await Promise.all([
       run.load(),
-      totals().then(
-        (t) => {
+      Promise.all([totals(), run.loadDisclosure()]).then(
+        ([t]) => {
           if (asked !== latest) return;
-          hasHistory = t.spotify.plays + t.youtube.plays > 0;
+          run.hasHistory = t.spotify.plays + t.youtube.plays > 0;
+          // A failure to send what is no longer stored has nothing left to say.
+          if (!run.hasHistory) run.error = '';
           problem = '';
         },
         (e) => {
@@ -44,9 +45,19 @@
   // One message, because a broken database fails both of these in the same words.
   const unread = $derived(problem || run.readError);
   const errors = $derived([missedError, run.error, unread].filter(Boolean));
+  // The Roast waits under the button it would otherwise be pushed down by, so this says why nothing is here yet.
+  const known = $derived(run.hasHistory !== undefined);
   const status = $derived(
-    importing && !run.running ? 'Reading your history. This screen will update when that finishes.' : run.phrase,
+    importing && !run.running
+      ? 'Reading your history. This screen will update when that finishes.'
+      : run.phrase || (known || unread ? '' : 'Looking at what is stored.'),
   );
+  const shown = $derived(run.running ? run.sendingTo : run.disclosure);
+
+  // Seen by being here. The rail only has to say so for someone who is elsewhere.
+  $effect(() => {
+    if (run.outcome) run.outcome = null;
+  });
 
   async function retry() {
     await check();
@@ -55,6 +66,8 @@
     if (!unread) ask?.querySelector('button')?.focus();
   }
 
+  const bringIntoView = (node: HTMLElement) => node.scrollIntoView({ block: 'nearest' });
+
   const day = (secs: number) =>
     new Date(secs * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 </script>
@@ -62,18 +75,22 @@
 <div class="screen">
   <header>
     <h1>Roast</h1>
-    <p>An AI reads a summary of your history and tells you what it really thinks.</p>
+    <p>An AI reads a Digest of your history and tells you what it really thinks.</p>
   </header>
 
   <!-- Every button has a tabindex, because a WebKit webview skips one on Tab without it. -->
-  {#if hasHistory === false && !importing}
+  {#if run.hasHistory === false && !importing}
     <div class="ask" bind:this={ask}>
-      <p>There is nothing to roast yet. Add your history on the Sources screen, or try the demo data there.</p>
+      {#if run.latest}
+        <p>Add your history on the Sources screen to write a new Roast.</p>
+      {:else}
+        <p>There is nothing to roast yet. Add your history on the Sources screen, or try the demo data there.</p>
+      {/if}
       <button tabindex="0" onclick={onsources}>Go to Sources</button>
     </div>
-  {:else if hasHistory}
+  {:else if run.hasHistory && shown}
     <div class="ask" bind:this={ask}>
-      <p>Your Digest goes to Anthropic through Claude Code. It holds counts and names, never your raw Plays.</p>
+      <p class:flagged={shown.flagged}>{shown.sendsTo}</p>
       <!-- aria-disabled, because a disabled button drops keyboard focus to the page. start() checks too. -->
       <button tabindex="0" aria-disabled={run.running} onclick={() => run.start()}>
         {run.latest ? 'Roast me again' : 'Roast me'}
@@ -95,14 +112,15 @@
   </div>
 
   {#each errors as message}
-    <p class="error" role="alert">{message}</p>
+    <!-- A person can be further down, reading the last Roast, when this arrives. -->
+    <p class="error" role="alert" use:bringIntoView>{message}</p>
   {/each}
   {#if unread}
     <button class="retry" tabindex="0" onclick={retry}>Try again</button>
   {/if}
 
   <!-- All of this was written by a Provider, so it only ever goes in as text. -->
-  {#if run.latest}
+  {#if run.latest && (known || unread)}
     {@const roast = run.latest.roast}
     <article>
       <h2 class="headline" dir="auto">{roast.headline}</h2>
@@ -168,6 +186,12 @@
     margin: 0;
   }
 
+  /* Red and the full ink, because the person has to read this one before they press anything. */
+  .ask .flagged {
+    padding-left: 12px;
+    border-left: 3px solid #f08a7e;
+  }
+
   button {
     padding: 9px 18px;
     border: 1px solid var(--brass);
@@ -200,8 +224,9 @@
     margin: 0;
   }
 
-  /* The lit part goes round and round: a reading is being taken. */
+  /* The lit part goes round and round: a reading is being taken. The dash and its gap add up to what the sweep moves, so the loop has no seam. */
   .progress :global(.arc) {
+    stroke-dasharray: 18 82;
     animation: sweep 2.4s linear infinite;
   }
 
@@ -339,6 +364,11 @@
   .sentence {
     margin: 12px 0 0;
     font: 18px/1.5 var(--serif);
+  }
+
+  /* WebKit takes an `li`'s alignment from the direction of its parent, so right to left text would sit at the left. */
+  li {
+    text-align: start;
   }
 
   ul {
