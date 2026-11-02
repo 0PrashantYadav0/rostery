@@ -1,6 +1,6 @@
-//! The Digest: all a Provider gets to read about a person's history. It holds counts, song and video
-//! titles, Creator names, Interests and dates, never URLs, IDs or raw Plays, and every string from
-//! history in it comes through `sanitize`.
+//! The Digest: all a Provider gets to read about a person's history, apart from the names in the tag
+//! step. It holds counts, song and video titles, Creator names, Interests and dates, never raw Plays,
+//! and every string from history in it comes through `sanitize`, which takes out most URLs and IDs.
 
 use crate::error::Result;
 use crate::model::{InterestMap, Play, Source};

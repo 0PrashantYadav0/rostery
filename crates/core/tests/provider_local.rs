@@ -150,6 +150,82 @@ fn an_error_body_of_any_shape_is_cut_and_cleaned() {
     assert!(!message.contains('\u{1b}'));
 }
 
+/// What a person reads when the server's own words are of no use: nothing sent, a web page from
+/// whatever is really at that address, or bytes that are not text. Each still has to be a sentence.
+#[test]
+fn a_failure_with_nothing_to_quote_still_reads_as_a_sentence() {
+    let page = "<!DOCTYPE html>\n<html><body><h1>502 Bad Gateway</h1></body></html>\n";
+    let bodies: [(usize, &[u8]); 5] = [
+        (500, b""),
+        (500, b"   \n"),
+        (502, page.as_bytes()),
+        (500, b"\xff\xfe\xfd\xfc"),
+        (503, b"<p>Service Unavailable</p>"),
+    ];
+    for (status, body) in bodies {
+        let mut server = Server::new();
+        server
+            .mock("POST", "/v1/chat/completions")
+            .with_status(status)
+            .with_body(body)
+            .create();
+        let url = base(&server);
+        let message = llm::complete(&local(&url), &request(), LONG_ENOUGH)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains(&url), "{message}");
+        assert!(message.contains(&status.to_string()), "{message}");
+        assert!(message.contains("gave no reason"), "{message}");
+        assert!(message.ends_with("try again."), "{message}");
+        for broken in [": .", "<", "\u{fffd}", "\n"] {
+            assert!(!message.contains(broken), "{broken:?} in {message}");
+        }
+    }
+}
+
+#[test]
+fn a_redirect_says_it_is_a_redirect_and_why_it_was_not_followed() {
+    for status in [301, 302, 307, 308] {
+        let mut server = Server::new();
+        server
+            .mock("POST", "/v1/chat/completions")
+            .with_status(status)
+            .with_header("location", "https://elsewhere.example/v1/chat/completions")
+            .with_body("<html>Moved</html>")
+            .create();
+        let url = base(&server);
+        let message = llm::complete(&local(&url), &request(), LONG_ENOUGH)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains(&url), "{message}");
+        assert!(message.contains(&status.to_string()), "{message}");
+        assert!(message.contains("redirect"), "{message}");
+        assert!(message.contains("does not follow"), "{message}");
+        assert!(message.ends_with("try again."), "{message}");
+        assert!(!message.contains("elsewhere.example"), "{message}");
+        assert!(!message.contains('<'), "{message}");
+    }
+}
+
+/// It answered, so it can be reached, whatever it answered with.
+#[test]
+fn a_success_that_is_not_text_or_not_json_is_a_reply_that_could_not_be_read() {
+    let bodies: [&[u8]; 3] = [b"\xff\xfe\xfd\xfc", b"<html>a web page</html>", b""];
+    for body in bodies {
+        let mut server = Server::new();
+        server
+            .mock("POST", "/v1/chat/completions")
+            .with_body(body)
+            .create();
+        let message = llm::complete(&local(&base(&server)), &request(), LONG_ENOUGH)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("could not read"), "{message}");
+        assert!(!message.contains("could not reach"), "{message}");
+        assert!(message.ends_with("try again."), "{message}");
+    }
+}
+
 #[test]
 fn local_api_key_sent_when_present() {
     let mut server = Server::new();
@@ -463,6 +539,33 @@ fn local_status_says_what_the_server_said() {
     assert!(locked.detail.contains("API key"), "{locked:?}");
 }
 
+/// An older Ollama with nothing pulled yet says `null` where a newer one says `[]`.
+#[test]
+fn an_empty_list_written_as_null_is_a_server_with_no_models() {
+    for body in [r#"{"object":"list","data":null}"#, r#"{"data":null}"#] {
+        let mut server = Server::new();
+        server.mock("GET", "/v1/models").with_body(body).create();
+        assert_eq!(
+            llm::list_models(&base(&server), None, LONG_ENOUGH).unwrap(),
+            [] as [&str; 0],
+            "{body}"
+        );
+        let status = llm::local_status(LocalServer::Ollama, &base(&server), "", None);
+        assert!(!status.available, "{status:?}");
+        assert!(status.detail.contains("no models yet"), "{status:?}");
+        assert!(status.detail.contains("ollama pull"), "{status:?}");
+    }
+
+    // With no `data` at all, this is some other server.
+    let mut server = Server::new();
+    server
+        .mock("GET", "/v1/models")
+        .with_body(r#"{"status":"ok"}"#)
+        .create();
+    let other = llm::local_status(LocalServer::Ollama, &base(&server), "", None);
+    assert!(other.detail.starts_with("Not running at"), "{other:?}");
+}
+
 #[test]
 fn a_status_check_that_hangs_costs_two_seconds() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -569,10 +672,13 @@ fn local_status_offers_no_cloud_model_and_says_where_a_saved_one_goes() {
         nothing_saved.detail.contains("ollama.com"),
         "{nothing_saved:?}"
     );
-    assert!(!nothing_saved.flagged, "{nothing_saved:?}");
+    assert!(
+        nothing_saved.sends_to.contains("stays on"),
+        "{nothing_saved:?}"
+    );
 
     let saved = llm::local_status(LocalServer::Ollama, &url, "gpt-oss:20b-cloud", None);
-    assert!(saved.flagged, "{saved:?}");
+    assert!(saved.sends_to.starts_with("Warning"), "{saved:?}");
     assert!(saved.sends_to.contains("ollama.com"), "{saved:?}");
     assert!(!saved.sends_to.contains("stays on"), "{saved:?}");
 
@@ -646,4 +752,46 @@ fn local_gets_more_time_than_a_cli() {
         Provider::ClaudeCode { model: None }.timeout(),
         Duration::from_secs(300)
     );
+}
+
+/// Its own clock, so that a stuck tag step cannot use up the wait before a Roast.
+#[test]
+fn the_tag_step_gets_less_time_than_a_roast() {
+    assert_eq!(
+        local("http://127.0.0.1:1/v1").tag_timeout(),
+        Duration::from_secs(300)
+    );
+    assert_eq!(
+        Provider::Codex { model: None }.tag_timeout(),
+        Duration::from_secs(120)
+    );
+    assert_eq!(
+        Provider::ClaudeCode { model: None }.tag_timeout(),
+        Duration::from_secs(120)
+    );
+}
+
+/// Names go to the Provider as well as the Digest, wherever that is, so every sentence has to say so.
+#[test]
+fn every_disclosure_says_creator_names_go_too() {
+    for provider in [
+        Provider::ClaudeCode { model: None },
+        Provider::Codex { model: None },
+        local("http://127.0.0.1:11434/v1"),
+        local("http://192.168.1.5:11434/v1"),
+        with_model("gemma4:cloud"),
+    ] {
+        let said = disclosure(provider).sends_to;
+        assert!(said.contains("80 Creator names"), "{said}");
+        assert!(said.contains("Source"), "{said}");
+    }
+}
+
+/// Rostery cannot stop this one, so the person has to be told. ADR 0003 has what was tried.
+#[test]
+fn only_the_codex_disclosure_mentions_its_agents_file() {
+    let said = disclosure(Provider::Codex { model: None }).sends_to;
+    assert!(said.contains("AGENTS.md"), "{said}");
+    let said = disclosure(Provider::ClaudeCode { model: None }).sends_to;
+    assert!(!said.contains("AGENTS.md"), "{said}");
 }

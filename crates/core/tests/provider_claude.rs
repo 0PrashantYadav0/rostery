@@ -4,9 +4,11 @@
 
 use rostery_core::demo;
 use rostery_core::digest;
+use rostery_core::interests;
 use rostery_core::llm::{self, CompletionRequest, Provider};
 use rostery_core::roast;
 use rostery_core::store::Store;
+use rostery_core::universe::{self, UniverseFilter};
 use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -418,6 +420,89 @@ fn stop_running_ends_a_cli_when_the_app_quits() {
     assert!(wait_until_gone(&fake.recorded("pid")));
 }
 
+fn demo_store() -> Store {
+    let mut store = Store::open_in_memory().unwrap();
+    demo::load(&mut store, 1_800_000_000).unwrap();
+    store
+}
+
+fn both(store: &Store) -> universe::Universe {
+    universe::from_store(store, UniverseFilter::Both).unwrap()
+}
+
+/// A stuck tag step costs its own timeout and marks nobody, so the Roast has all of its own.
+#[test]
+fn a_tag_step_that_hangs_costs_only_its_timeout_and_is_stopped() {
+    let fake = Fake::new("echo $$ > \"$(dirname \"$0\")/pid\"\nsleep 60 &\nwait");
+    let mut store = demo_store();
+    let universe = both(&store);
+    let started = Instant::now();
+    let message = interests::tag_missing(
+        &Provider::ClaudeCode { model: None },
+        &mut store,
+        &universe,
+        Duration::from_secs(1),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(message.contains("did not finish"), "{message}");
+    assert!(wait_until_gone(&fake.recorded("pid")));
+    assert!(store.ai_asked().unwrap().is_empty());
+}
+
+#[test]
+fn quitting_during_the_tag_step_stops_the_cli() {
+    let fake = Fake::new("echo $$ > \"$(dirname \"$0\")/pid\"\nsleep 60 &\nwait");
+    let mut store = demo_store();
+    let universe = both(&store);
+    std::thread::scope(|scope| {
+        let run = scope.spawn(|| {
+            interests::tag_missing(
+                &Provider::ClaudeCode { model: None },
+                &mut store,
+                &universe,
+                LONG_ENOUGH,
+            )
+        });
+        let pid_file = fake.dir.path().join("pid");
+        let until = Instant::now() + Duration::from_secs(5);
+        while !pid_file.exists() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let started = Instant::now();
+        llm::stop_running();
+        let message = run.join().unwrap().unwrap_err().to_string();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(message.contains("stopped before it finished"), "{message}");
+    });
+    assert!(wait_until_gone(&fake.recorded("pid")));
+    assert!(store.ai_asked().unwrap().is_empty());
+}
+
+/// The same locked down way as a Roast, because the names were written by strangers too.
+#[test]
+fn the_tag_step_runs_the_cli_locked_down_with_the_names_on_stdin() {
+    let fake =
+        Fake::new(r#"printf '{"type":"result","is_error":false,"result":"{\\"creators\\":[]}"}'"#);
+    let mut store = demo_store();
+    let universe = both(&store);
+    interests::tag_missing(
+        &Provider::ClaudeCode { model: None },
+        &mut store,
+        &universe,
+        LONG_ENOUGH,
+    )
+    .unwrap();
+    let argv = fake.argv();
+    for flag in ["--tools", "--strict-mcp-config", "--setting-sources"] {
+        assert!(argv.iter().any(|a| a == flag), "{flag}: {argv:?}");
+    }
+    let stdin = fake.recorded("stdin");
+    assert!(stdin.starts_with("<creators>\n"), "{stdin}");
+    assert!(!argv.iter().any(|a| a.contains("Moth Season")), "{argv:?}");
+}
+
 /// Runs one `#[ignore]` test below in a process of its own, launched the way Finder launches an app:
 /// a bare PATH, with `home` as HOME. So the real `login_shell_path` and its OnceLock start fresh.
 fn in_a_fresh_process(test: &str, home: &Path, shell: &Path) {
@@ -619,6 +704,115 @@ fn stumbling_shell_recovers() {
     // An answer is worth keeping, so the next Roast does not ask.
     assert_eq!(ask_fresh().unwrap(), "hello");
     assert_eq!(asked(), 2);
+}
+
+/// The whole of a Roast's work, the way `generate_roast` does it. Prints what it got, for a person to
+/// judge whether the tags and the Links make sense. Costs a little subscription use.
+#[test]
+#[ignore = "talks to the real claude CLI"]
+fn live_interests() {
+    let _env = ENV.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut store = demo_store();
+    let provider = Provider::ClaudeCode {
+        model: Some("haiku".into()),
+    };
+    let before = both(&store);
+    let link_key = |u: &universe::Universe, l: &universe::Link| {
+        let name = |id: u32| u.planets[id as usize].name.clone();
+        let (a, b) = (name(l.a), name(l.b));
+        if a < b {
+            (a, b)
+        } else {
+            (b, a)
+        }
+    };
+    let links_before: std::collections::HashSet<_> =
+        before.links.iter().map(|l| link_key(&before, l)).collect();
+
+    let started = Instant::now();
+    let tagged =
+        interests::tag_missing(&provider, &mut store, &before, provider.tag_timeout()).unwrap();
+    println!(
+        "tagged {tagged} of {} in {:?}",
+        before.planets.len(),
+        started.elapsed()
+    );
+    assert!(tagged > 0);
+
+    let after = both(&store);
+    println!("\nINTERESTS");
+    for planet in &after.planets {
+        println!(
+            "{:?} {}: {:?}",
+            planet.source, planet.name, planet.interests
+        );
+    }
+    println!(
+        "\nNEW LINKS ({} before, {} after)",
+        before.links.len(),
+        after.links.len()
+    );
+    let cross_source = |u: &universe::Universe, l: &universe::Link| {
+        u.planets[l.a as usize].source != u.planets[l.b as usize].source
+    };
+    let new: Vec<_> = after
+        .links
+        .iter()
+        .filter(|l| !links_before.contains(&link_key(&after, l)))
+        .collect();
+    for link in &new {
+        let (a, b) = link_key(&after, link);
+        println!(
+            "{a} <-> {b}: {:.2}, shared {:?}, across Sources: {}",
+            link.strength,
+            link.shared,
+            cross_source(&after, link)
+        );
+    }
+
+    let started = Instant::now();
+    let digest = digest::from_store(&store, 1_800_000_000).unwrap();
+    let roast = roast::generate(
+        &provider,
+        &digest,
+        roast::default_system_prompt(),
+        llm::DEFAULT_TIMEOUT,
+    )
+    .unwrap();
+    println!("\nROAST in {:?}", started.elapsed());
+    println!("{}", serde_json::to_string_pretty(&roast).unwrap());
+    store
+        .save_roast(provider.label(), &roast, 1_800_000_000, true)
+        .unwrap();
+
+    println!("\nGALAXIES");
+    let spotify = universe::from_store(&store, UniverseFilter::Spotify).unwrap();
+    let youtube = universe::from_store(&store, UniverseFilter::Youtube).unwrap();
+    let named = both(&store);
+    for (view, u) in [
+        ("both", &named),
+        ("spotify", &spotify),
+        ("youtube", &youtube),
+    ] {
+        let names: Vec<&str> = u.galaxies.iter().map(|g| g.name.as_str()).collect();
+        println!("{view}: {names:?}");
+    }
+
+    // No assertion on new Links. Demo Creators already hold 4 Interests, so a Provider's tags mostly
+    // dilute them, and any new Link is down to who else fell out of a Planet's top 6. Whether tags make
+    // Links is `ai_tags_create_links`, and whether they do on real history is a stop point 3 check.
+    let from_roast: Vec<&str> = roast.galaxy_names.iter().map(|g| g.name.as_str()).collect();
+    assert!(
+        named
+            .galaxies
+            .iter()
+            .any(|g| from_roast.contains(&g.name.as_str())),
+        "no Galaxy has a Roast name: {from_roast:?}"
+    );
+
+    // Everybody has been asked about now, so nothing goes out the second time.
+    let asked = interests::next_to_tag(&store, &named).unwrap();
+    assert!(asked.is_empty(), "{asked:?}");
 }
 
 /// Costs a little subscription use, so it only runs when asked for.

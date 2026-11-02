@@ -1,7 +1,7 @@
 //! Providers: the AI that writes a Roast. A CLI Provider is the person's own binary, which handles
-//! its own login. A Digest holds text written by strangers, so the CLI gets no tools, no settings and
-//! an empty folder. ADR 0003 has the reasons. A local Provider is any server that speaks the OpenAI
-//! chat API, and it has to say where it is.
+//! its own login. A Digest holds text written by strangers, so the CLI gets as few tools and settings as
+//! it will give up, and an empty folder. ADR 0003 has the reasons and what is left. A local Provider is
+//! any server that speaks the OpenAI chat API, and it has to say where it is.
 
 use crate::error::{Error, Result};
 use crate::roast;
@@ -23,6 +23,9 @@ use ureq::http::Uri;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 /// A model on a CPU writes slowly.
 pub const LOCAL_TIMEOUT: Duration = Duration::from_secs(600);
+/// The tag step before a Roast has a clock of its own, so a stuck one cannot use up the Roast's wait.
+const TAG_TIMEOUT: Duration = Duration::from_secs(120);
+const LOCAL_TAG_TIMEOUT: Duration = Duration::from_secs(300);
 const LOCAL_STATUS_TIMEOUT: Duration = Duration::from_secs(2);
 /// A CLI has a runtime to start, which a cold disk can take longer than 2 seconds over.
 const CLI_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -40,15 +43,18 @@ const INSTALL_DIRS_IN_HOME: [&str; 6] = [
     ".cargo/bin",
 ];
 const INSTALL_DIRS: [&str; 2] = ["/opt/homebrew/bin", "/usr/local/bin"];
-/// A stray key would move the person from their subscription to metered billing. The last two mark a
-/// launch from a Claude Code terminal, which would make `claude` refuse to run inside itself.
-const REMOVED_ENV: [&str; 6] = [
+/// A stray key would move the person from their subscription to metered billing. The next two mark a
+/// launch from a Claude Code terminal, which would make `claude` refuse to run inside itself. The last
+/// two would put colour codes in front of the words a CLI's errors get recognised by.
+const REMOVED_ENV: [&str; 8] = [
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "OPENAI_API_KEY",
     "CODEX_API_KEY",
     "CLAUDECODE",
     "CLAUDE_CODE_ENTRYPOINT",
+    "FORCE_COLOR",
+    "CLICOLOR_FORCE",
 ];
 /// Far more than any real reply.
 const MAX_OUTPUT_BYTES: u64 = 4 << 20;
@@ -62,7 +68,12 @@ const SETTINGS_LOST: &str =
     "Rostery could not read your saved settings, so it no longer knows which \
      Provider you chose. Your Digest stays on this computer until you choose one in Settings.";
 const DIGEST_HOLDS: &str =
-    "It holds song and video titles, Creator names, Interests and dates, never your raw Plays.";
+    "It holds song and video titles, Creator names, Interests and dates, never your raw Plays. Before \
+     it, up to 80 Creator names go the same way with their Source and nothing else, to be tagged with \
+     Interests.";
+const CODEX_ADDS: &str =
+    "Codex also sends your own ~/.codex/AGENTS.md, if you have one, and Rostery \
+                          cannot stop that.";
 
 /// Which card a local Provider is. They speak the same API, so either can be pointed at any server
 /// that does.
@@ -173,6 +184,14 @@ impl Provider {
             _ => DEFAULT_TIMEOUT,
         }
     }
+
+    /// How long the tag step before a Roast may take.
+    pub fn tag_timeout(&self) -> Duration {
+        match self {
+            Provider::Local { .. } => LOCAL_TAG_TIMEOUT,
+            _ => TAG_TIMEOUT,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -244,7 +263,7 @@ fn run_cli(
     let attempt = |path: &str| {
         let mut cmd = Command::new(binary(cli.binary));
         configure(&mut cmd);
-        cmd.env("PATH", path);
+        cmd.env("PATH", path).env("NO_COLOR", "1");
         for key in REMOVED_ENV {
             cmd.env_remove(key);
         }
@@ -426,15 +445,22 @@ fn claude_reply(done: &Finished) -> Result<String> {
         .ok_or_else(|| cli_unreadable(&CLAUDE))
 }
 
-/// Turned off because a read-only sandbox does not stop them, and each one is a way for a title that
-/// says "ignore your instructions" to reach out. Tried one by one against codex-cli 0.164.0. A key an
-/// older CLI has never heard of is ignored, since `--strict-config` is not set.
-const CODEX_TOOLS_OFF: [&str; 5] = [
+/// Tried one by one against codex-cli 0.164.0, and ADR 0003 has what they leave. A key an older CLI has
+/// never heard of is ignored, since `--strict-config` is not set. The first five are turned off because
+/// a read-only sandbox does not stop them, and each one is a way for a title that says "ignore your
+/// instructions" to reach out. The next two are tools a Roast has no use for, gone on most models. The
+/// last two are text of the person's that would go along with each request: what their skills do, and
+/// their folder, shell and time zone.
+const CODEX_OFF: [&str; 9] = [
     "features.shell_tool=false",
     "web_search=\"disabled\"",
     "features.apps=false",
     "features.image_generation=false",
     "features.view_image=false",
+    "features.multi_agent=false",
+    "features.goals=false",
+    "skills.include_instructions=false",
+    "include_environment_context=false",
 ];
 
 /// A TOML basic string. JSON's escapes are all valid in one, apart from DEL, which TOML wants escaped
@@ -459,7 +485,7 @@ fn codex(
         cmd.args(["exec", "--skip-git-repo-check", "--ephemeral"])
             .args(["--sandbox", "read-only"])
             .args(["--ignore-rules", "--ignore-user-config"]);
-        for off in CODEX_TOOLS_OFF {
+        for off in CODEX_OFF {
             cmd.args(["-c", off]);
         }
         cmd.arg("--output-schema")
@@ -523,24 +549,31 @@ fn endpoint(base_url: &str, path: &str) -> String {
     format!("{}/{path}", base_url.trim_end_matches('/'))
 }
 
+/// As text, whatever it holds. A server that sent bytes that are not text still answered, and whoever
+/// reads this can say it made no sense, where an error here would read as a server that cannot be reached.
 fn read_body(
     response: &mut ureq::http::Response<ureq::Body>,
 ) -> std::result::Result<String, ureq::Error> {
-    response
+    let bytes = response
         .body_mut()
         .with_config()
         .limit(MAX_OUTPUT_BYTES)
-        .read_to_string()
+        .read_to_vec()?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// A server's complaint in its own words, from any of the shapes they come in.
-fn error_detail(body: &str) -> String {
+/// A server's complaint in its own words, from any of the shapes they come in. Nothing when it has no
+/// words to quote: an empty body, a web page from whatever is at that address, or bytes that are not text.
+fn error_detail(body: &str) -> Option<String> {
     let parsed = serde_json::from_str::<Value>(body).unwrap_or_default();
     let said = parsed["error"]["message"]
         .as_str()
         .or(parsed["error"].as_str())
         .unwrap_or(body);
-    roast::clean(said, MAX_MESSAGE_CHARS)
+    if said.trim_start().starts_with('<') || said.contains(char::REPLACEMENT_CHARACTER) {
+        return None;
+    }
+    Some(roast::clean(said, MAX_MESSAGE_CHARS)).filter(|detail| !detail.is_empty())
 }
 
 fn local_unreachable(
@@ -622,20 +655,29 @@ fn local(
     if !response.status().is_success() {
         let code = response.status().as_u16();
         let said = error_detail(&text);
-        let quoted = said.trim_end_matches('.');
-        return Err(Error::Provider(if matches!(code, 401 | 403) {
-            format!("{}, then try again.", wants_a_key(server, base_url, code))
-        } else if said.to_lowercase().contains("context") {
-            format!(
+        let quoted = said.as_deref().map(|s| s.trim_end_matches('.'));
+        return Err(Error::Provider(match quoted {
+            _ if matches!(code, 401 | 403) => {
+                format!("{}, then try again.", wants_a_key(server, base_url, code))
+            }
+            _ if response.status().is_redirection() => format!(
+                "{label} at {base_url} answered with a redirect ({code}). Rostery does not follow one, \
+                 because it could take your Digest somewhere this screen does not name. Check the \
+                 address in Settings, then try again."
+            ),
+            Some(quoted) if quoted.to_lowercase().contains("context") => format!(
                 "{label} at {base_url} answered with an error ({code}): {quoted}. To raise its context \
                  length, {}, then try again.",
                 server.how_to_raise_context()
-            )
-        } else {
-            format!(
+            ),
+            Some(quoted) => format!(
                 "{label} at {base_url} answered with an error ({code}): {quoted}. Check the model and \
                  the address in Settings, then try again."
-            )
+            ),
+            None => format!(
+                "{label} at {base_url} answered with an error ({code}) and gave no reason. Check the \
+                 model and the address in Settings, then try again."
+            ),
         }));
     }
     let reply = serde_json::from_str::<Value>(&text).unwrap_or_default();
@@ -684,11 +726,14 @@ pub fn list_models(
         return Err(ModelsProblem::Status(response.status().as_u16()));
     }
     let text = read_body(&mut response).map_err(|_| ModelsProblem::Unreachable)?;
-    // Something answers there, and it is not one of these servers if it has no list to give.
+    // Something answers there, and it is not one of these servers if it has no list to give. An older
+    // Ollama with nothing pulled has `null` for one.
     let parsed = serde_json::from_str::<Value>(&text).unwrap_or_default();
-    let data = parsed["data"]
-        .as_array()
-        .ok_or(ModelsProblem::Unreachable)?;
+    let data = match parsed.get("data") {
+        Some(Value::Array(data)) => data.as_slice(),
+        Some(Value::Null) => &[],
+        _ => return Err(ModelsProblem::Unreachable),
+    };
     Ok(data
         .iter()
         .filter_map(|model| model["id"].as_str())
@@ -710,6 +755,10 @@ fn is_loopback(host: &str) -> bool {
             .trim_end_matches(']')
             .parse::<IpAddr>()
             .is_ok_and(|ip| ip.is_loopback())
+}
+
+fn on_this_computer(url: &str) -> bool {
+    host_of(url).is_some_and(|host| is_loopback(&host))
 }
 
 /// Ollama passes a model with one of these endings on to ollama.com, through the same local port.
@@ -740,7 +789,7 @@ fn disclosure(p: &Provider) -> Disclosure {
             false,
         ),
         Provider::Codex { .. } => (
-            format!("Your Digest goes to OpenAI through Codex. {DIGEST_HOLDS}"),
+            format!("Your Digest goes to OpenAI through Codex. {DIGEST_HOLDS} {CODEX_ADDS}"),
             false,
         ),
         Provider::Local {
@@ -790,7 +839,6 @@ pub struct ProviderStatus {
     /// One sentence, with the next step when something is missing.
     pub detail: String,
     pub sends_to: String,
-    pub flagged: bool,
     /// What a local server has to offer, which is never a cloud model.
     pub models: Vec<String>,
 }
@@ -802,14 +850,12 @@ fn status_of(
     detail: String,
     models: Vec<String>,
 ) -> ProviderStatus {
-    let Disclosure { sends_to, flagged } = disclosure(p);
     ProviderStatus {
         id: p.id().to_owned(),
         available,
         signed_in,
         detail,
-        sends_to,
-        flagged,
+        sends_to: disclosure(p).sends_to,
         models,
     }
 }
@@ -944,11 +990,28 @@ fn claude_says_logged_in(stdout: &str) -> bool {
 }
 
 /// Each Provider's state, checked at the same time, so one that hangs costs no more than its timeout.
-/// This spawns processes and calls the network, so it only ever runs on a worker thread.
+/// This spawns processes and calls the network, so it only ever runs on a worker thread. An address
+/// that is not this computer is only called once it is the chosen Provider, because it was saved on
+/// some other day and may be somebody else's device on this network.
 pub fn statuses(settings: &Settings) -> Vec<ProviderStatus> {
     let path = child_path(login_shell_path());
     let path = path.as_str();
-    let check = |p: &Provider| match p {
+    let chosen = (!settings.choose_again).then(|| settings.provider.id());
+    let check = |p: &Provider| {
+        match p {
+        Provider::Local { base_url, .. }
+            if Some(p.id()) != chosen && !on_this_computer(base_url) =>
+        {
+            status_of(
+                p,
+                false,
+                true,
+                "Not asked, because this address is not on this computer and you have not chosen it. \
+                 Choose it to ask."
+                    .to_owned(),
+                Vec::new(),
+            )
+        }
         Provider::ClaudeCode { .. } => {
             let (available, signed_in, detail) =
                 cli_status(&CLAUDE, &["auth", "status"], claude_says_logged_in, path);
@@ -965,6 +1028,7 @@ pub fn statuses(settings: &Settings) -> Vec<ProviderStatus> {
             model,
             api_key,
         } => local_status(*server, base_url, model, api_key.as_deref()),
+    }
     };
     let setups = settings.in_card_order();
     std::thread::scope(|scope| {
@@ -984,20 +1048,42 @@ pub fn statuses(settings: &Settings) -> Vec<ProviderStatus> {
 
 /// What the person chose on the Settings screen.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", from = "SavedSettings")]
 pub struct Settings {
     /// The one that writes the next Roast.
     pub provider: Provider,
     /// The voice, when it is not the default. `roast` always adds the fixed part to it.
     pub system_prompt: Option<String>,
     /// How each of the others was set up, so trying one does not lose another's address or model.
-    #[serde(default)]
     pub others: Vec<Provider>,
-    /// What was saved could not be read, so `provider` is only a placeholder that nobody chose, and no
-    /// Digest goes anywhere until someone does. Kept when saved, because changing the prompt is not
-    /// choosing a Provider.
-    #[serde(default)]
+    /// What was saved could not be read or named no Provider, so `provider` is only a placeholder that
+    /// nobody chose, and no Digest goes anywhere until someone does. Kept when saved, because changing
+    /// the prompt is not choosing a Provider.
     pub choose_again: bool,
+}
+
+/// How `Settings` is read. Every field has a default, so a later task can add one with no migration. A
+/// default Provider would be a choice nobody made, so a row with none in it asks for one again.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct SavedSettings {
+    provider: Option<Provider>,
+    system_prompt: Option<String>,
+    others: Vec<Provider>,
+    choose_again: bool,
+}
+
+impl From<SavedSettings> for Settings {
+    fn from(saved: SavedSettings) -> Settings {
+        Settings {
+            choose_again: saved.choose_again || saved.provider.is_none(),
+            provider: saved
+                .provider
+                .unwrap_or_else(|| Settings::default().provider),
+            system_prompt: saved.system_prompt,
+            others: saved.others,
+        }
+    }
 }
 
 fn every_provider() -> [Provider; 4] {
@@ -1677,6 +1763,52 @@ mod tests {
             &Provider::Codex { model: None }
         );
         assert!(!settings.disclosure().flagged);
+    }
+
+    /// A field added later has a default, so an older save loads. The Provider is the one field that
+    /// has none worth having, because a default for it would be a choice nobody made.
+    #[test]
+    fn a_save_with_no_provider_in_it_keeps_the_rest_and_asks_for_one() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .set_setting(
+                "settings",
+                &json!({
+                    "systemPrompt": "my long prompt",
+                    "others": [ollama("http://127.0.0.1:9/v1")],
+                }),
+            )
+            .unwrap();
+
+        let settings = Settings::load(&store).unwrap();
+
+        assert_eq!(settings.voice(), "my long prompt");
+        assert!(settings.others.contains(&ollama("http://127.0.0.1:9/v1")));
+        assert!(settings.provider_to_send_to().is_err());
+        let said = settings.disclosure();
+        assert!(said.flagged, "{said:?}");
+        assert!(!said.sends_to.contains("Anthropic"), "{said:?}");
+        assert!(said.sends_to.contains("choose one in Settings"), "{said:?}");
+
+        // And an empty row is just the same, with the default voice.
+        store.set_setting("settings", &json!({})).unwrap();
+        let empty = Settings::load(&store).unwrap();
+        assert!(empty.provider_to_send_to().is_err());
+        assert_eq!(empty.voice(), roast::default_system_prompt());
+    }
+
+    #[test]
+    fn a_save_with_a_provider_needs_nothing_else() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .set_setting("settings", &json!({"provider": {"codex": {"model": null}}}))
+            .unwrap();
+        let settings = Settings::load(&store).unwrap();
+        assert_eq!(
+            settings.provider_to_send_to().unwrap(),
+            &Provider::Codex { model: None }
+        );
+        assert_eq!(settings.voice(), roast::default_system_prompt());
     }
 
     #[test]

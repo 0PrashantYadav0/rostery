@@ -4,10 +4,14 @@
 
 use rostery_core::demo;
 use rostery_core::digest::{self, Digest};
+use rostery_core::interests;
 use rostery_core::llm::{self, CompletionRequest, LocalServer, Provider, ProviderStatus, Settings};
 use rostery_core::roast;
 use rostery_core::store::Store;
+use rostery_core::universe::{self, UniverseFilter};
 use serde_json::{json, Value};
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
@@ -160,9 +164,34 @@ fn codex_has_its_shell_web_apps_and_image_tools_turned_off() {
         "features.apps=false",
         "features.image_generation=false",
         "features.view_image=false",
+        "features.multi_agent=false",
+        "features.goals=false",
+        "skills.include_instructions=false",
+        "include_environment_context=false",
     ] {
         assert!(given.contains(&off), "{off} is missing: {given:?}");
     }
+}
+
+/// With colour forced from the environment, a logged out Codex's `ERROR:` line starts with escape
+/// codes, nothing matches it, and the person gets "exit code 1" and no way to log in.
+#[test]
+fn codex_is_not_allowed_to_colour_its_errors() {
+    let fake = Fake::new(OK);
+    let forced = ["FORCE_COLOR", "CLICOLOR_FORCE"];
+    for key in forced {
+        std::env::set_var(key, "1");
+    }
+    let reply = fake.ask(LONG_ENOUGH);
+    for key in forced {
+        std::env::remove_var(key);
+    }
+    reply.unwrap();
+    let env = fake.recorded("env");
+    for key in forced {
+        assert!(!env.contains(&format!("{key}=")), "{key} in {env}");
+    }
+    assert!(env.lines().any(|line| line == "NO_COLOR=1"), "{env}");
 }
 
 #[test]
@@ -316,6 +345,29 @@ fn codex_schema_is_strict() {
     assert_eq!(schema["type"], "object");
     assert!(schema["properties"]["verdict"]["properties"]["score"].is_object());
     assert_strict(&schema, "roast");
+}
+
+#[test]
+fn codex_schema_for_interests_is_strict() {
+    let fake = Fake::new(r#"printf '%s' '{"creators":[]}' > "$out""#);
+    const NOW: i64 = 1_800_000_000;
+    let mut store = Store::open_in_memory().unwrap();
+    demo::load(&mut store, NOW).unwrap();
+    let both = universe::from_store(&store, UniverseFilter::Both).unwrap();
+
+    interests::tag_missing(
+        &Provider::Codex { model: None },
+        &mut store,
+        &both,
+        LONG_ENOUGH,
+    )
+    .unwrap();
+
+    let schema: Value = serde_json::from_str(&fake.recorded("schema")).unwrap();
+    assert_eq!(schema["type"], "object");
+    assert!(schema["properties"]["creators"]["items"]["properties"]["interests"].is_object());
+    assert_strict(&schema, "interests");
+    assert!(fake.recorded("stdin").starts_with("<creators>"));
 }
 
 /// What codex-cli 0.164.0 really prints with nobody logged in: the prompt, then each try at connecting.
@@ -515,9 +567,86 @@ fn a_status_says_where_the_model_saved_on_that_row_would_send_a_digest() {
     let all = llm::statuses(&settings);
 
     let cloud = status(&all, "ollama");
-    assert!(cloud.flagged, "{cloud:?}");
+    assert!(cloud.sends_to.starts_with("Warning"), "{cloud:?}");
     assert!(cloud.sends_to.contains("ollama.com"), "{cloud:?}");
-    assert!(!status(&all, "lm-studio").flagged);
+    assert!(status(&all, "lm-studio").sends_to.contains("stays on"));
+}
+
+/// `127.1` reaches the same port on this machine, and does not count as this computer, which makes it a
+/// way to see whether a server elsewhere gets called. A saved address can be a device on someone else's
+/// network by now, and just opening Settings should not call it.
+#[test]
+fn a_server_elsewhere_is_only_asked_once_it_is_the_chosen_provider() {
+    let fake = Fake::new(OK);
+    std::env::set_var("ROSTERY_CLAUDE_BIN", fake.dir.path().join("no-claude"));
+    std::env::set_var("ROSTERY_CODEX_BIN", fake.dir.path().join("no-codex"));
+    let mut server = mockito::Server::new();
+    let elsewhere = Provider::Local {
+        server: LocalServer::Ollama,
+        base_url: format!("http://127.1:{}/v1", server.socket_address().port()),
+        model: "tiny".into(),
+        api_key: None,
+    };
+
+    // Not chosen, and with nothing chosen at all.
+    let never = server.mock("GET", "/v1/models").expect(0).create();
+    let unchosen = Settings {
+        others: vec![elsewhere.clone()],
+        ..Settings::default()
+    };
+    let lost = Settings {
+        provider: elsewhere.clone(),
+        choose_again: true,
+        ..Settings::default()
+    };
+    for settings in [unchosen, lost] {
+        let all = llm::statuses(&settings);
+        let row = status(&all, "ollama");
+        assert!(!row.available, "{row:?}");
+        assert!(row.models.is_empty(), "{row:?}");
+        assert!(row.detail.starts_with("Not asked"), "{row:?}");
+        assert!(row.detail.ends_with('.'), "{row:?}");
+        assert!(row.sends_to.starts_with("Warning"), "{row:?}");
+    }
+    never.assert();
+    never.remove();
+
+    let asked = server
+        .mock("GET", "/v1/models")
+        .with_body(r#"{"data":[{"id":"tiny"}]}"#)
+        .create();
+    let all = llm::statuses(&Settings {
+        provider: elsewhere,
+        ..Settings::default()
+    });
+    let row = status(&all, "ollama");
+    assert!(row.available, "{row:?}");
+    assert_eq!(row.models, ["tiny"]);
+    asked.assert();
+}
+
+/// One on this computer is still asked, chosen or not, because nothing leaves for that.
+#[test]
+fn a_server_on_this_computer_is_asked_whether_or_not_it_is_chosen() {
+    let fake = Fake::new(OK);
+    std::env::set_var("ROSTERY_CLAUDE_BIN", fake.dir.path().join("no-claude"));
+    std::env::set_var("ROSTERY_CODEX_BIN", fake.dir.path().join("no-codex"));
+    let mut server = mockito::Server::new();
+    let asked = server
+        .mock("GET", "/v1/models")
+        .with_body(r#"{"data":[{"id":"tiny"}]}"#)
+        .create();
+    let all = llm::statuses(&Settings {
+        others: vec![Provider::Local {
+            server: LocalServer::LmStudio,
+            base_url: format!("{}/v1", server.url()),
+            model: String::new(),
+            api_key: None,
+        }],
+        ..Settings::default()
+    });
+    assert_eq!(status(&all, "lm-studio").models, ["tiny"]);
+    asked.assert();
 }
 
 #[test]
@@ -606,6 +735,158 @@ fn live_codex_cannot_read_a_file_or_open_a_page() {
         !reply.contains("Example Domain"),
         "it opened the page: {reply}"
     );
+}
+
+/// The real CLI with the flags Rostery really gives it, pointed at a server here by a wrapper, in a
+/// throwaway home holding a planted skill and AGENTS.md. So this uses no login and sends nothing away,
+/// and it reads the first request Codex tries to make, which is the only way to see what goes.
+/// Each key it checks is one Codex would otherwise ignore without a word if it got renamed.
+#[test]
+#[ignore = "runs the real codex CLI against a server on this computer"]
+fn live_codex_request_holds_no_skills_or_where_it_ran() {
+    let _env = ENV.lock().unwrap_or_else(PoisonError::into_inner);
+    let dir = TempDir::new().unwrap();
+    let (home, codex_home) = (dir.path().join("home"), dir.path().join("codex"));
+    let skill = codex_home.join("skills/plant");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(codex_home.join("AGENTS.md"), "PLANTED-AGENTS-FILE").unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: plant\ndescription: PLANTED-SKILL\n---\nPLANTED-SKILL-BODY\n",
+    )
+    .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let wrapper = dir.path().join("codex-wrapper");
+    write_script(
+        &wrapper,
+        &format!(
+            "shift\n\
+             export HOME='{home}' CODEX_HOME='{codex_home}'\n\
+             export HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 NO_PROXY=127.0.0.1\n\
+             exec codex exec \
+             -c 'model_provider=\"here\"' -c 'model_providers.here.name=\"here\"' \
+             -c 'model_providers.here.base_url=\"http://127.0.0.1:{port}/v1\"' \
+             -c 'model_providers.here.wire_api=\"responses\"' \
+             -c model_providers.here.request_max_retries=0 \
+             -c model_providers.here.stream_max_retries=0 \"$@\"",
+            home = home.display(),
+            codex_home = codex_home.display(),
+        ),
+    );
+    std::env::set_var("ROSTERY_CODEX_BIN", &wrapper);
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let _ = tx.send(first_body_of(stream));
+        }
+    });
+    // It has to fail, as all this server does is listen, and what counts is what it tried to send.
+    let _ = llm::complete(
+        &Provider::Codex { model: None },
+        &request(),
+        Duration::from_secs(60),
+    );
+    std::env::remove_var("ROSTERY_CODEX_BIN");
+
+    let body = rx
+        .try_iter()
+        .find(|body| body.contains("only on stdin"))
+        .expect("Codex never sent the prompt");
+    assert!(!body.contains("PLANTED-SKILL"), "a skill went with it");
+    assert!(!body.contains("<environment_context>"), "and where it ran");
+    assert!(!body.contains("<timezone>"), "and the time zone");
+    println!(
+        "AGENTS.md went with it: {}. ADR 0003 says it does, so change that if this changes.",
+        body.contains("PLANTED-AGENTS-FILE")
+    );
+}
+
+/// Reads one HTTP request and answers it with an error, which is all this needs from a server.
+fn first_body_of(mut stream: TcpStream) -> String {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut seen = Vec::new();
+    let mut buffer = [0; 65_536];
+    while let Ok(n) = stream.read(&mut buffer) {
+        if n == 0 {
+            break;
+        }
+        seen.extend_from_slice(&buffer[..n]);
+        let text = String::from_utf8_lossy(&seen);
+        if let Some((head, body)) = text.split_once("\r\n\r\n") {
+            let wanted = head
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())?
+                })
+                .unwrap_or(0);
+            if body.len() >= wanted {
+                break;
+            }
+        }
+    }
+    let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\n\r\n");
+    String::from_utf8_lossy(&seen).into_owned()
+}
+
+/// Colour forced from the environment, an empty login and the real CLI. No history and no key are in
+/// this, and OpenAI turns it away, so it says what a logged out person really gets told.
+#[test]
+#[ignore = "runs the real codex CLI with no login, which reaches OpenAI and gets refused"]
+fn live_codex_logged_out_is_recognised_with_colour_forced() {
+    let _env = ENV.lock().unwrap_or_else(PoisonError::into_inner);
+    let dir = TempDir::new().unwrap();
+    let wrapper = dir.path().join("codex-wrapper");
+    write_script(
+        &wrapper,
+        &format!(
+            "export HOME='{0}' CODEX_HOME='{0}'\nexec codex \"$@\"",
+            dir.path().display()
+        ),
+    );
+    std::env::set_var("ROSTERY_CODEX_BIN", &wrapper);
+    std::env::set_var("FORCE_COLOR", "1");
+    std::env::set_var("CLICOLOR_FORCE", "1");
+    let result = llm::complete(
+        &Provider::Codex { model: None },
+        &CompletionRequest {
+            system: "Say hello.".into(),
+            user: "hello".into(),
+            schema: json!({"type": "object"}),
+        },
+        llm::DEFAULT_TIMEOUT,
+    );
+    std::env::remove_var("ROSTERY_CODEX_BIN");
+    std::env::remove_var("FORCE_COLOR");
+    std::env::remove_var("CLICOLOR_FORCE");
+    let message = result.unwrap_err().to_string();
+    println!("{message}");
+    assert!(message.contains("not logged in"), "{message}");
+    assert!(message.contains("codex login"), "{message}");
+}
+
+/// Whether OpenAI takes this schema, because a refusal would only ever show in a log.
+#[test]
+#[ignore = "talks to the real codex CLI"]
+fn live_codex_interests() {
+    let _env = ENV.lock().unwrap_or_else(PoisonError::into_inner);
+    const NOW: i64 = 1_800_000_000;
+    let mut store = Store::open_in_memory().unwrap();
+    demo::load(&mut store, NOW).unwrap();
+    let both = universe::from_store(&store, UniverseFilter::Both).unwrap();
+    let provider = Provider::Codex { model: None };
+    let started = Instant::now();
+    let tagged =
+        interests::tag_missing(&provider, &mut store, &both, provider.tag_timeout()).unwrap();
+    println!("tagged {tagged} in {:?}", started.elapsed());
+    assert!(tagged > 0);
 }
 
 /// Costs a little subscription use, so it only runs when asked for.
