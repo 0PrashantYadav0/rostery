@@ -3075,7 +3075,6 @@ const statusOf = (id: ProviderStatus['id'], rest: Partial<ProviderStatus> = {}):
   signedIn: true,
   detail: 'Logged in.',
   sendsTo: `Your Digest goes somewhere through ${id}.`,
-  flagged: false,
   models: [],
   ...rest,
 });
@@ -3293,7 +3292,7 @@ test('a status check that fails says why, and the rest of the screen still works
   await expect(page.getByText('Not known')).toHaveCount(4);
   await expect(page.getByText('Checking')).toHaveCount(0);
   await expect(page.locator('.lamp.wait')).toHaveCount(0);
-  await expect(page.getByText('Asked just now.')).toHaveCount(0);
+  await expect(page.getByText(/^Last asked at/)).toHaveCount(0);
 });
 
 test('a line about where the Digest goes that fails says why, and the Providers still get checked', async ({ page }) => {
@@ -3306,7 +3305,7 @@ test('a line about where the Digest goes that fails says why, and the Providers 
   });
   await openSettings(page);
   await expect(page.getByText('Logged in.', { exact: true })).toBeVisible();
-  await expect(page.getByText('Asked just now.')).toBeVisible();
+  await expect(page.getByText(/^Last asked at/)).toBeVisible();
   await expect(visibleAlert(page)).toHaveText(NO_DATABASE);
 });
 
@@ -3469,7 +3468,7 @@ test('a Provider choice that fails says why, stays where it was, and the next on
     },
   });
   await openSettings(page);
-  await expect(page.getByText('Asked just now.')).toBeVisible();
+  await expect(page.getByText(/^Last asked at/)).toBeVisible();
   await page.getByRole('radio', { name: /Codex/ }).click();
   await expect(visibleAlert(page)).toHaveText(NO_DATABASE);
   await expect(page.getByRole('radio', { name: /Claude Code/ })).toBeChecked();
@@ -3601,7 +3600,7 @@ test('a refused address keeps its warning until it is put right or the Provider 
     },
   });
   await openSettings(page);
-  await expect(page.getByText('Asked just now.')).toBeVisible();
+  await expect(page.getByText(/^Last asked at/)).toBeVisible();
   const address = page.getByRole('textbox', { name: 'Server address' });
   const alert = page.getByRole('alert');
   await address.fill('nope');
@@ -4082,4 +4081,424 @@ test('Tab reaches the way out of an empty Roast screen', async ({ page }) => {
   await expect(page.getByRole('button', { name: 'Go to Sources' })).toBeVisible();
 
   expect(await reachedByTab(page, 15), 'Go to Sources was never reached').toContain('Go to Sources');
+});
+
+const namesToTag: { source: Source; name: string }[] = [
+  { source: 'spotify', name: 'Moth Season' },
+  { source: 'youtube', name: 'Lighthouse Lofi' },
+];
+
+test('the dialog shows the exact names the tag step would send next, alongside the Digest', async ({ page }) => {
+  let waiting = namesToTag;
+  await installMockIpc(page, { ...withHistory, ...settingsMocks().handlers, creators_to_tag: () => waiting });
+  await openSettings(page);
+  await page.getByRole('button', { name: 'See what gets sent' }).click();
+  const dialog = page.getByRole('dialog', { name: 'What gets sent' });
+
+  await expect(dialog.locator('pre')).toBeVisible();
+  await expect(dialog.getByRole('heading', { name: 'Creators to tag first' })).toBeVisible();
+  await expect(dialog.getByText('and nothing else')).toBeVisible();
+  const rows = dialog.getByRole('listitem');
+  await expect(rows).toHaveText(['Moth Season Spotify', 'Lighthouse Lofi YouTube']);
+  await dialog.getByRole('button', { name: 'Close' }).click();
+
+  // Nobody left to tag is said out loud, and the Digest is still there.
+  waiting = [];
+  await page.getByRole('button', { name: 'See what gets sent' }).click();
+  await expect(dialog.locator('pre')).toBeVisible();
+  await expect(dialog.getByText('No Creators are waiting to be tagged')).toBeVisible();
+  await expect(rows).toHaveCount(0);
+});
+
+test('a hostile, long or right to left name in the dialog stays text and stays inside it', async ({ page }) => {
+  await page.setViewportSize({ width: 640, height: 480 });
+  const attack = '</li><img src=x onerror=window.ran=1>';
+  const arabic = 'قناة الموسيقى الهادئة';
+  await installMockIpc(page, {
+    ...withHistory,
+    ...settingsMocks().handlers,
+    creators_to_tag: () => [
+      { source: 'spotify', name: attack },
+      { source: 'youtube', name: 'w'.repeat(120) },
+      { source: 'youtube', name: arabic },
+      ...Array.from({ length: 77 }, (_, i) => ({ source: 'spotify', name: `Creator ${i}` })),
+    ],
+  });
+  await openSettings(page);
+  await page.getByRole('button', { name: 'See what gets sent' }).click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.getByRole('listitem')).toHaveCount(80);
+  await expect(dialog.getByRole('listitem').first()).toContainText(attack);
+  await expect(dialog.locator('img')).toHaveCount(0);
+  expect(await page.evaluate(() => (window as any).ran)).toBeUndefined();
+
+  const list = dialog.getByRole('list');
+  const sizes = await list.evaluate((node) => ({ scroll: node.scrollWidth, client: node.clientWidth }));
+  expect(sizes.scroll).toBeLessThanOrEqual(sizes.client);
+  const box = (await dialog.boundingBox())!;
+  expect(box.y + box.height).toBeLessThanOrEqual(480);
+  expect(box.x + box.width).toBeLessThanOrEqual(640);
+  // A long list scrolls by keyboard, like the Digest above it.
+  await list.focus();
+  await page.keyboard.press('End');
+  await expect.poll(() => list.evaluate((node) => node.scrollTop)).toBeGreaterThan(0);
+});
+
+test('a screen reader hears when the dialog has finished reading', async ({ page }) => {
+  let finish = (_: string | null) => {};
+  let preview: () => unknown = () => new Promise((resolve) => (finish = resolve));
+  await installMockIpc(page, { ...withHistory, ...settingsMocks().handlers, digest_preview: () => preview() });
+  await openSettings(page);
+  await page.getByRole('button', { name: 'See what gets sent' }).click();
+  const dialog = page.getByRole('dialog');
+  const said = dialog.getByRole('status');
+  await expect(said).toHaveText('Reading your history');
+  finish('{}');
+  await expect(said).toContainText('below');
+  await dialog.getByRole('button', { name: 'Close' }).click();
+
+  preview = () => null;
+  await page.getByRole('button', { name: 'See what gets sent' }).click();
+  await expect(said).toContainText('There is nothing to send yet');
+});
+
+test('the dialog says web addresses, says most of them, and mentions what Codex adds only for Codex', async ({ page }) => {
+  const mocks = settingsMocks();
+  await installMockIpc(page, { ...withHistory, ...mocks.handlers });
+  await openSettings(page);
+  await page.getByRole('button', { name: 'See what gets sent' }).click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.getByText('most web addresses')).toBeVisible();
+  await expect(dialog).not.toContainText(/\blinks\b/);
+  await expect(dialog).not.toContainText('AGENTS.md');
+  await dialog.getByRole('button', { name: 'Close' }).click();
+  await expect(page.getByText('song and video titles and Creator names are data')).toBeVisible();
+
+  await page.getByRole('radio', { name: /Codex/ }).check();
+  await page.getByRole('button', { name: 'See what gets sent' }).click();
+  await expect(dialog).toContainText('AGENTS.md');
+});
+
+const offeringAll = (models: string[]) => () => everyStatus.map((s) => (s.id === 'ollama' ? { ...s, available: true, models } : s));
+
+test('a status answer never fills in a model that only makes embeddings', async ({ page }) => {
+  const mocks = settingsMocks(onOllama());
+  await installMockIpc(page, {
+    ...withHistory,
+    ...mocks.handlers,
+    provider_statuses: offeringAll(['nomic-embed-text', 'mxbai-EMBED-large', 'tiny']),
+  });
+  await openSettings(page);
+  await expect(page.getByRole('combobox', { name: 'Model' })).toHaveValue('tiny');
+});
+
+test('with only embedding models on offer the model stays empty, and they can still be chosen', async ({ page }) => {
+  const mocks = settingsMocks(onOllama());
+  await installMockIpc(page, { ...withHistory, ...mocks.handlers, provider_statuses: offeringAll(['nomic-embed-text']) });
+  await openSettings(page);
+  await expect(page.getByText(/^Last asked at/)).toBeVisible();
+  await expect(page.getByRole('combobox', { name: 'Model' })).toHaveValue('');
+  expect(mocks.state.saves).toEqual([]);
+  await expect(page.locator('datalist option')).toHaveCount(1);
+});
+
+test('choosing a server that has not been asked yet asks it', async ({ page }) => {
+  const mocks = settingsMocks();
+  let asked = 0;
+  await installMockIpc(page, {
+    ...withHistory,
+    ...mocks.handlers,
+    provider_statuses: () => {
+      asked += 1;
+      return everyStatus.map((s) =>
+        s.id !== 'ollama'
+          ? s
+          : asked === 1
+            ? { ...s, available: false, detail: 'Not asked, because this address is not on this computer and you have not chosen it. Choose it to ask.' }
+            : { ...s, available: true, detail: 'Running at http://192.168.1.5:11434/v1, with 1 model.', models: ['tiny'] },
+      );
+    },
+  });
+  await openSettings(page);
+  await expect(page.getByText('Not asked, because')).toBeVisible();
+  await page.getByRole('radio', { name: /Ollama/ }).check();
+  await expect(page.getByText('Running at http://192.168.1.5:11434/v1')).toBeVisible();
+  expect(asked).toBe(2);
+});
+
+test('a refused address does not move to the next card', async ({ page }) => {
+  const mocks = settingsMocks(onOllama());
+  const refused = 'Rostery cannot use the address "nope".';
+  await installMockIpc(page, {
+    ...withHistory,
+    ...mocks.handlers,
+    save_settings: async ({ settings }: { settings: Settings }) => {
+      if (JSON.stringify(settings).includes('nope')) throw new Error(refused);
+      mocks.state.saved = settings;
+      return settings;
+    },
+  });
+  await openSettings(page);
+  await page.getByRole('textbox', { name: 'Server address' }).fill('nope');
+  // Straight to another local card, whose own address box would show it. The click is what blurs the box.
+  await page.getByRole('radio', { name: /LM Studio/ }).check();
+  await expect.poll(() => chosenProvider(mocks.state.saved) === 'local' && JSON.stringify(mocks.state.saved.provider)).toContain('lmStudio');
+  await page.waitForTimeout(100);
+  await expect(visibleAlert(page)).toHaveCount(0);
+});
+
+test('a too-long message goes when the text is put back', async ({ page }) => {
+  const mocks = settingsMocks();
+  const tooLong = 'That system prompt is 20001 characters long and the limit is 20000.';
+  await installMockIpc(page, {
+    ...withHistory,
+    ...mocks.handlers,
+    save_settings: ({ settings }: { settings: Settings }) => {
+      if ((settings.systemPrompt ?? '').length > 20000) throw new Error(tooLong);
+      mocks.state.saved = settings;
+      return settings;
+    },
+  });
+  await openSettings(page);
+  const box = page.getByRole('textbox', { name: 'System prompt' });
+  const setText = (text: string) =>
+    box.evaluate((node: HTMLTextAreaElement, text) => {
+      node.value = text;
+      node.dispatchEvent(new Event('input', { bubbles: true }));
+      node.dispatchEvent(new Event('change', { bubbles: true }));
+    }, text);
+  await setText('x'.repeat(20001));
+  await expect(visibleAlert(page)).toHaveText(tooLong);
+  await setText(defaultVoice);
+  await expect(visibleAlert(page)).toHaveCount(0);
+});
+
+test('an address refused on the way out goes once a good one is saved', async ({ page }) => {
+  const mocks = settingsMocks(onOllama());
+  const refused = 'Rostery cannot use the address "nope".';
+  await installMockIpc(page, {
+    ...withHistory,
+    ...mocks.handlers,
+    save_settings: ({ settings }: { settings: Settings }) => {
+      if (JSON.stringify(settings).includes('nope')) throw new Error(refused);
+      mocks.state.saved = settings;
+      return settings;
+    },
+  });
+  await openSettings(page);
+  const address = page.getByRole('textbox', { name: 'Server address' });
+  await address.fill('nope');
+  await leave(page, 'Roast');
+  await expect(visibleAlert(page)).toContainText(refused);
+  await leave(page, 'Settings');
+  await expect(visibleAlert(page)).toHaveText(refused);
+
+  await address.fill('http://127.0.0.1:11435/v1');
+  await address.blur();
+  await expect.poll(() => JSON.stringify(mocks.state.saved)).toContain('11435');
+  await expect(visibleAlert(page)).toHaveCount(0);
+});
+
+test('Settings has words while it reads, and a way to try again when that fails', async ({ page }) => {
+  const mocks = settingsMocks();
+  let finish = () => {};
+  let read: () => unknown = () => new Promise<void>((resolve) => (finish = resolve)).then(() => mocks.state.saved);
+  await installMockIpc(page, { ...withHistory, ...mocks.handlers, get_settings: () => read() });
+  await openSettings(page);
+  await expect(page.getByRole('status').filter({ hasText: 'Reading your settings.' })).toBeVisible();
+  await expect(page.getByRole('radio')).toHaveCount(0);
+  finish();
+  await expect(page.getByRole('radio')).toHaveCount(4);
+  await expect(page.getByText('Reading your settings.')).toHaveCount(0);
+
+  read = () => {
+    throw new Error(NO_DATABASE);
+  };
+  await leave(page, 'Roast');
+  await leave(page, 'Settings');
+  await expect(visibleAlert(page)).toHaveText(NO_DATABASE);
+  await expect(page.getByText('Reading your settings.')).toHaveCount(0);
+  const again = page.getByRole('button', { name: 'Try again' });
+
+  // Still failing, it stays where it was with focus on it.
+  await again.click();
+  await expect(visibleAlert(page)).toHaveText(NO_DATABASE);
+  await expect(again).toBeFocused();
+
+  read = () => mocks.state.saved;
+  await again.click();
+  await expect(page.getByRole('radio')).toHaveCount(4);
+  await expect(visibleAlert(page)).toHaveCount(0);
+  await expect(again).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Check again' })).toBeFocused();
+});
+
+test('a Provider radio shows a focus ring after an arrow key', async ({ page }) => {
+  await installMockIpc(page, { ...withHistory, ...settingsMocks().handlers });
+  await openSettings(page);
+  await page.getByRole('radio', { name: /Claude Code/ }).focus();
+  await page.keyboard.press('ArrowDown');
+  const codex = page.getByRole('radio', { name: /Codex/ });
+  await expect(codex).toBeFocused();
+  const ring = await codex.evaluate((node) => {
+    const style = getComputedStyle(node);
+    return { style: style.outlineStyle, width: style.outlineWidth };
+  });
+  expect(ring).toEqual({ style: 'solid', width: '2px' });
+});
+
+/** WCAG's contrast ratio between two computed colours. */
+function contrast(a: string, b: string) {
+  const luminance = (text: string) => {
+    const [r, g, b] = text.match(/[\d.]+/g)!.map(Number).map((c) => {
+      const s = c / 255;
+      return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+test('placeholders and field borders meet AA, and a right to left prompt reads right to left', async ({ page }) => {
+  await installMockIpc(page, { ...withHistory, ...settingsMocks(onOllama()).handlers });
+  await openSettings(page);
+  const model = page.getByRole('combobox', { name: 'Model' });
+  await expect(model).toBeVisible();
+  const colours = await model.evaluate((node) => ({
+    placeholder: getComputedStyle(node, '::placeholder').color,
+    border: getComputedStyle(node).borderTopColor,
+    field: getComputedStyle(node).backgroundColor,
+    around: getComputedStyle(document.querySelector('.switch')!).backgroundColor,
+  }));
+  expect(contrast(colours.placeholder, colours.field)).toBeGreaterThanOrEqual(4.5);
+  expect(contrast(colours.border, colours.field)).toBeGreaterThanOrEqual(3);
+  expect(contrast(colours.border, colours.around)).toBeGreaterThanOrEqual(3);
+
+  const box = page.getByRole('textbox', { name: 'System prompt' });
+  const boxColours = await box.evaluate((node) => ({
+    border: getComputedStyle(node).borderTopColor,
+    field: getComputedStyle(node).backgroundColor,
+    page: getComputedStyle(document.body).backgroundColor,
+  }));
+  expect(contrast(boxColours.border, boxColours.field)).toBeGreaterThanOrEqual(3);
+  expect(contrast(boxColours.border, boxColours.page)).toBeGreaterThanOrEqual(3);
+
+  await expect(box).toHaveAttribute('dir', 'auto');
+  await expect(model).toHaveAttribute('dir', 'auto');
+});
+
+test('the line about the check says when it was, not that it was just now', async ({ page }) => {
+  await installMockIpc(page, { ...withHistory, ...settingsMocks().handlers });
+  await openSettings(page);
+  await expect(page.getByText(/^Last asked at \d/)).toBeVisible();
+  await expect(page.getByText('just now')).toHaveCount(0);
+});
+
+test('a prompt still being typed is saved at a pause, so a window that closes does not lose it', async ({ page }) => {
+  const mocks = settingsMocks();
+  await installMockIpc(page, { ...withHistory, ...mocks.handlers });
+  await openSettings(page);
+  const box = page.getByRole('textbox', { name: 'System prompt' });
+  await box.fill('Speak only of soup.');
+  // Nothing has left the box, which is all a window closing leaves time for.
+  await expect(box).toBeFocused();
+  await expect.poll(() => mocks.state.saved.systemPrompt).toBe('Speak only of soup.');
+  await expect(box).toBeFocused();
+  await expect(box).toHaveValue('Speak only of soup.');
+
+  // A box left blank is someone about to write, so the default does not come back under them yet.
+  await box.fill('');
+  await page.waitForTimeout(1700);
+  await expect(box).toHaveValue('');
+  expect(mocks.state.saved.systemPrompt).toBe('Speak only of soup.');
+});
+
+test('a pause in typing leaves Reset and its Undo alone', async ({ page }) => {
+  const mocks = settingsMocks();
+  await installMockIpc(page, { ...withHistory, ...mocks.handlers });
+  await openSettings(page);
+  const box = page.getByRole('textbox', { name: 'System prompt' });
+  await box.fill('Speak only of soup.');
+  await page.getByRole('button', { name: 'Reset to default' }).click();
+  await expect(box).toHaveValue(defaultVoice);
+  await expect(page.getByRole('button', { name: 'Undo' })).toBeVisible();
+  await page.waitForTimeout(1700);
+  await expect(page.getByRole('button', { name: 'Undo' })).toBeVisible();
+  await expect(box).toHaveValue(defaultVoice);
+  expect(mocks.state.saved.systemPrompt).toBe(null);
+});
+
+test('the message from Settings does not make the Universe screen scroll', async ({ page }) => {
+  const mocks = settingsMocks();
+  await installMockIpc(page, {
+    ...withUniverse(),
+    ...withHistory,
+    get_universe: () => universe(),
+    ...mocks.handlers,
+    save_settings: () => {
+      throw new Error(NO_DATABASE);
+    },
+  });
+  await openSettings(page);
+  await page.getByRole('textbox', { name: 'System prompt' }).fill('Speak only of soup.');
+  await leave(page, 'Universe');
+  await expect(visibleAlert(page)).toContainText('Your last change in Settings was not saved');
+  await expect(page.locator('.sky canvas, .sky')).not.toHaveCount(0);
+
+  const main = page.locator('main');
+  const sizes = await main.evaluate((node) => ({ scroll: node.scrollHeight, client: node.clientHeight }));
+  expect(sizes.scroll).toBeLessThanOrEqual(sizes.client);
+  // The sky has what is left, and nothing of it goes under the edge.
+  const screen = (await page.locator('main .screen:visible').boundingBox())!;
+  const edge = (await main.boundingBox())!;
+  expect(screen.y + screen.height).toBeLessThanOrEqual(edge.y + edge.height + 1);
+  expect(screen.height).toBeGreaterThan(200);
+
+  // The other screens still scroll as they did.
+  await page.setViewportSize({ width: 800, height: 300 });
+  await leave(page, 'Settings');
+  const tall = await main.evaluate((node) => ({ scroll: node.scrollHeight, client: node.clientHeight }));
+  expect(tall.scroll).toBeGreaterThan(tall.client);
+});
+
+test('a Universe on screen when a Roast ends shows the new tags and names', async ({ page }) => {
+  let finish = (_: StoredRoast) => {};
+  let names = 'Before';
+  const sky = () => {
+    const u = universe();
+    u.galaxies[0].name = names;
+    return u;
+  };
+  await installMockIpc(page, {
+    ...withHistory,
+    get_universe: sky,
+    generate_roast: () =>
+      new Promise((resolve) => {
+        finish = (roast) => resolve({ roast, notSaved: null });
+      }),
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Roast', exact: true }).click();
+  await page.getByRole('button', { name: 'Roast me' }).click();
+  await leave(page, 'Universe');
+  await expect(page.getByText('Before', { exact: true })).toBeVisible();
+
+  names = 'The Screen Hours';
+  finish(aRoast);
+  await expect(page.getByText('The Screen Hours', { exact: true })).toBeVisible();
+  await expect(page.getByText('Before', { exact: true })).toHaveCount(0);
+});
+
+test('the Roast screen says when Creators are being tagged', async ({ page }) => {
+  await installMockIpc(page, {
+    ...withHistory,
+    generate_roast: () => new Promise(() => {}),
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Roast', exact: true }).click();
+  await page.getByRole('button', { name: 'Roast me' }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'Reading your history' })).toBeVisible();
+  await emitEvent(page, 'roast-progress', 'Tagging your Creators with Interests');
+  await expect(page.getByRole('status').filter({ hasText: 'Tagging your Creators with Interests' })).toBeVisible();
 });

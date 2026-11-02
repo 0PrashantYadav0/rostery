@@ -137,11 +137,18 @@ export interface Disclosure {
   flagged: boolean;
 }
 
-export interface ProviderStatus extends Disclosure {
+export interface ProviderStatus {
   id: ProviderId;
   available: boolean;
   signedIn: boolean;
   /** One sentence, with the next step when something is missing. */
   detail: string;
+  sendsTo: string;
   models: string[];
+}
+
+/** A Creator as the tag step sends it, which is all it sends. */
+export interface CreatorToTag {
+  source: Source;
+  name: string;
 }

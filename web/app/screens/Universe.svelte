@@ -2,6 +2,7 @@
   import { errorMessage, getUniverse, openSourceLink } from '../../shared/api';
   import type { Universe, UniverseFilter } from '../../shared/types';
   import UniverseView from '../../universe/UniverseView.svelte';
+  import { roastRun as run } from '../roast-run.svelte';
 
   let { importing, missedError, stored }: { importing: boolean; missedError: string; stored: number } = $props();
 
@@ -11,11 +12,13 @@
   let universes = $state.raw<Partial<Record<UniverseFilter, Universe>>>();
   let error = $state('');
 
-  // Runs when this screen opens and again each time Sources finishes changing what is stored. The last
-  // answer wins, so a slow one from before an import cannot replace the one from after it.
+  // Runs when this screen opens, each time Sources finishes changing what is stored, and when a Roast
+  // starts or ends, because a Roast brings new Interests and Galaxy names even if it fails after the tags.
+  // The last answer wins, so a slow one from before an import cannot replace the one from after it.
   let latest = 0;
   $effect(() => {
     stored;
+    run.running;
     const asked = (latest += 1);
     Promise.all(FILTERS.map(getUniverse))
       .then((answers) => {

@@ -212,6 +212,7 @@
 
   /* Stays in sight, because a person can be down a long Roast when this arrives. */
   .unsaved {
+    flex: none;
     position: sticky;
     top: 0;
     z-index: 1;
@@ -223,7 +224,10 @@
     overflow-wrap: anywhere;
   }
 
+  /* A column, so the Universe's full height is what the message above it leaves. Its screen clips, so it can shrink, and the others cannot go below their content, so they still scroll. */
   main {
+    display: flex;
+    flex-direction: column;
     overflow: auto;
     background: radial-gradient(ellipse 80% 60% at 70% 0%, #172036, transparent 70%);
   }

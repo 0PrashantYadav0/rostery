@@ -42,6 +42,7 @@ fn main() {
             commands::generate_roast,
             commands::latest_roast,
             commands::digest_preview,
+            commands::creators_to_tag,
             commands::provider_statuses,
             commands::provider_disclosure,
             commands::get_settings,

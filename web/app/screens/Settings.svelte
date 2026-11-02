@@ -13,8 +13,8 @@
 
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { defaultSystemPrompt, digestPreview, errorMessage, getSettings, providerStatuses, saveSettings } from '../../shared/api';
-  import type { Provider, ProviderId, ProviderStatus } from '../../shared/types';
+  import { creatorsToTag, defaultSystemPrompt, digestPreview, errorMessage, getSettings, providerStatuses, saveSettings } from '../../shared/api';
+  import type { CreatorToTag, Provider, ProviderId, ProviderStatus } from '../../shared/types';
   import { roastRun as run } from '../roast-run.svelte';
 
   let { missedError }: { missedError: string } = $props();
@@ -30,7 +30,10 @@
   let chosen = $state<ProviderId | null>();
   let statuses = $state.raw<ProviderStatus[]>([]);
   let checking = $state(false);
-  let checked = $state(false);
+  /** The time of the last answer, as a person would say it. */
+  let askedAt = $state('');
+  /** What is saved could not be read, so there is nothing to show but a way to try again. */
+  let loadFailed = $state(false);
   let problem = $state('');
   let checkProblem = $state('');
   let addressProblem = $state('');
@@ -47,12 +50,27 @@
   let undo = $state<string>();
   /** What a save is on its way with, so leaving does not send the same text twice. */
   let saving: string | undefined;
+  const TYPING_PAUSE_MS = 1500;
+  let typingPause: ReturnType<typeof setTimeout>;
 
+  let checkButton = $state<HTMLElement>();
+  let retryButton = $state<HTMLElement>();
   let resetButton = $state<HTMLElement>();
   let dialog = $state<HTMLDialogElement>();
   let digest = $state<string | null>(null);
+  let toTag = $state.raw<CreatorToTag[]>([]);
   let digestLoading = $state(false);
   let digestProblem = $state('');
+  // Always something once it has an answer, because focus stays on Close and this is all a screen reader hears.
+  const digestWords = $derived(
+    digestProblem
+      ? ''
+      : digestLoading
+        ? 'Reading your history'
+        : digest === null
+          ? 'There is nothing to send yet. Add your history on the Sources screen, or try the demo data there.'
+          : 'Your Digest is below.',
+  );
 
   const idOf = (p: Provider): ProviderId =>
     'claudeCode' in p ? 'claude-code' : 'codex' in p ? 'codex' : p.local.server === 'ollama' ? 'ollama' : 'lm-studio';
@@ -99,42 +117,53 @@
       if (asked !== latestCheck) return;
       statuses = answer;
       checkProblem = '';
-      checked = true;
+      askedAt = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
       fillModel();
     } catch (e) {
       if (asked !== latestCheck) return;
       checkProblem = errorMessage(e);
-      checked = false;
+      askedAt = '';
     }
     checking = false;
   }
 
   /**
-   * A local Provider cannot start with no model, so it takes the first its server offers, never a cloud model, until told otherwise.
+   * A local Provider cannot start with no model, so it takes the first its server offers until told otherwise. Never a cloud model, which
+   * the server's status leaves out, and never one that only makes embeddings, since that cannot write a Roast.
    * What is in the box may not be saved yet, and a person in the box may be about to tell it otherwise.
    */
   function fillModel() {
     if (destroyed || !chosen || chosen === 'claude-code' || chosen === 'codex') return;
     if (modelBox?.value || document.activeElement === modelBox) return;
-    const first = statusOf(chosen)?.models[0];
+    const first = statusOf(chosen)?.models.find((model) => !/embed/i.test(model));
     if (first && !modelOf(setup(chosen))) setModel(first);
   }
 
   async function setModel(model: string) {
-    modelProblem = await update((s) => ({ ...s, provider: withModel(s.provider, model) }));
-    return modelProblem;
+    // The person can have moved on by the time this lands, and the refusal is not about the next card.
+    const card = chosen;
+    const why = await update((s) => ({ ...s, provider: withModel(s.provider, model) }));
+    if (chosen === card) modelProblem = why;
+    return why;
   }
 
   /** The words on its row are about the saved model. One filled in from the list stays on this computer and changes nothing there. */
   async function modelTyped(model: string) {
-    if (!(await setModel(model))) check();
+    if (!(await setModel(model))) {
+      problem = '';
+      check();
+    }
   }
 
   async function setAddress(baseUrl: string) {
+    const card = chosen;
     const why = await update((s) => ('local' in s.provider ? { ...s, provider: { local: { ...s.provider.local, baseUrl } } } : s));
-    addressProblem = why;
+    if (chosen === card) addressProblem = why;
     // A status is about the address that was saved, so one that was refused changes nothing there.
-    if (!why) check();
+    if (!why) {
+      problem = '';
+      check();
+    }
   }
 
   async function choose(id: ProviderId) {
@@ -149,12 +178,20 @@
       return;
     }
     fillModel();
+    // A server somewhere else is not asked about until it is the chosen one, which it now is.
+    if ('local' in setup(id) && !statusOf(id)?.available) check();
   }
 
   const promptSaved = () => settings!.systemPrompt ?? defaultPrompt;
 
   async function savePrompt() {
-    if (prompt === promptSaved() || prompt === saving) return;
+    clearTimeout(typingPause);
+    if (prompt === promptSaved()) {
+      // Put back as it was, so a refusal of what was there before has nothing left to be about.
+      promptProblem = '';
+      return;
+    }
+    if (prompt === saving) return;
     undo = undefined;
     const sent = (saving = prompt);
     const why = await update((s) => ({ ...s, systemPrompt: sent }));
@@ -165,6 +202,7 @@
       unsaved.prompt = why ? sent : undefined;
     }
     promptProblem = why;
+    if (!why) problem = '';
     promptNote = why ? '' : settings!.systemPrompt === null ? 'Back to the default prompt.' : 'Saved. The next Roast uses this.';
     // Blank comes back as the default, which is what goes in the box. Unless someone has typed since.
     if (!why && prompt === sent) prompt = promptSaved();
@@ -172,6 +210,7 @@
 
   async function reset() {
     if (prompt === defaultPrompt) return;
+    clearTimeout(typingPause);
     const lost = prompt;
     prompt = defaultPrompt;
     promptProblem = '';
@@ -188,53 +227,76 @@
     resetButton?.focus();
   }
 
-  /** Words about the last save say nothing about what is being typed now. */
+  /**
+   * Words about the last save say nothing about what is being typed now. Closing the window is not a blur and has no time for one last
+   * save, so a pause in the typing saves too. Not a box left blank, which would turn into the default prompt under someone about to write.
+   */
+  // ponytail: the last second and a half of typing before a close is lost. Holding the close in Rust until a save lands would cover it.
   function typing() {
     promptNote = '';
     undo = undefined;
+    clearTimeout(typingPause);
+    typingPause = setTimeout(() => {
+      if (prompt.trim()) savePrompt();
+    }, TYPING_PAUSE_MS);
   }
 
   async function openPreview() {
     digest = null;
+    toTag = [];
     digestProblem = '';
     digestLoading = true;
     // The last Digest has to go first. It would take focus as the dialog opened, then drop it to the page.
     await tick();
     dialog?.showModal();
     try {
-      digest = await digestPreview();
+      [digest, toTag] = await Promise.all([digestPreview(), creatorsToTag()]);
     } catch (e) {
       digestProblem = errorMessage(e);
     }
     digestLoading = false;
   }
 
+  async function load() {
+    try {
+      // What a save from the last time here leaves is what there is to read.
+      await queue;
+      const [saved, voice] = await Promise.all([getSettings(), defaultSystemPrompt()]);
+      if (destroyed) return;
+      settings = saved;
+      chosen = chosenIn(saved);
+      defaultPrompt = voice;
+      prompt = unsaved.prompt ?? promptSaved();
+      problem = '';
+      loadFailed = false;
+      // A prompt is back in its box, and trying again says whether it is saved now. Anything else has only its reason left.
+      if (unsaved.prompt === undefined) problem = unsaved.why;
+      else savePrompt();
+      unsaved.why = '';
+      unsaved.prompt = undefined;
+    } catch (e) {
+      problem = errorMessage(e);
+      loadFailed = true;
+      return;
+    }
+    // Neither waited for, because the screen is ready and the first can take seconds.
+    check();
+    run.loadDisclosure().catch((e) => (problem = errorMessage(e)));
+  }
+
+  async function retry() {
+    await load();
+    await tick();
+    // Its button is gone when that worked, and focus would otherwise fall to the page.
+    (loadFailed ? retryButton : checkButton)?.focus();
+  }
+
   onMount(() => {
-    (async () => {
-      try {
-        // What a save from the last time here leaves is what there is to read.
-        await queue;
-        const [saved, voice] = await Promise.all([getSettings(), defaultSystemPrompt()]);
-        if (destroyed) return;
-        settings = saved;
-        chosen = chosenIn(saved);
-        defaultPrompt = voice;
-        prompt = unsaved.prompt ?? promptSaved();
-        // A prompt is back in its box, and trying again says whether it is saved now. Anything else has only its reason left.
-        if (unsaved.prompt === undefined) problem = unsaved.why;
-        else savePrompt();
-        unsaved.why = '';
-        unsaved.prompt = undefined;
-      } catch (e) {
-        problem = errorMessage(e);
-        return;
-      }
-      // Neither waited for, because the screen is ready and the first can take seconds.
-      check();
-      run.loadDisclosure().catch((e) => (problem = errorMessage(e)));
-    })();
+    load();
     return () => {
       destroyed = true;
+      // This screen's text can be old by the time that fires, and the next screen may have saved a newer one.
+      clearTimeout(typingPause);
       // The box that still holds what was refused is going, so its message goes on to the next screen.
       unsaved.why = addressProblem || modelProblem || unsaved.why;
       // Leaving is not always a blur, because a dropped file changes the screen by itself.
@@ -254,15 +316,22 @@
     <p class="error" role="alert" use:bringIntoView>{message}</p>
   {/each}
 
-  {#if chosen !== undefined}
+  {#if chosen === undefined}
+    <!-- Mounted before its words change, or a screen reader would not announce them. -->
+    <p class="reading" role="status">{loadFailed ? '' : 'Reading your settings.'}</p>
+    {#if loadFailed}
+      <button class="retry" tabindex="0" bind:this={retryButton} onclick={retry}>Try again</button>
+    {/if}
+  {:else}
     <section aria-labelledby="provider-name">
       <div class="heading">
         <h2 id="provider-name">Provider</h2>
         <div class="check">
           <!-- Focus stays on the button, so this is how a screen reader hears that the answers are in. -->
-          <p role="status">{checking ? 'Asking each Provider.' : checked ? 'Asked just now.' : ''}</p>
+          <!-- A time, because someone back from a terminal needs to see how old these answers are. -->
+          <p role="status">{checking ? 'Asking each Provider.' : askedAt ? `Last asked at ${askedAt}.` : ''}</p>
           <!-- aria-disabled, because a disabled button drops keyboard focus to the page. A WebKit webview skips a button on Tab without a tabindex. -->
-          <button tabindex="0" aria-disabled={checking} onclick={() => checking || check()}>Check again</button>
+          <button tabindex="0" bind:this={checkButton} aria-disabled={checking} onclick={() => checking || check()}>Check again</button>
         </div>
       </div>
       {#if run.running}
@@ -305,6 +374,7 @@
                     bind:this={modelBox}
                     value={modelOf(provider)}
                     list="models"
+                    dir="auto"
                     spellcheck="false"
                     autocapitalize="off"
                     autocomplete="off"
@@ -340,11 +410,11 @@
         <button tabindex="0" bind:this={resetButton} aria-disabled={prompt === defaultPrompt} onclick={reset}>Reset to default</button>
       </div>
       <p class="about">
-        How your Provider is told to write. Rostery always adds the shape of the reply and the rule that song titles and names are data,
-        not orders, so an edit here cannot break a Roast. Up to 20,000 characters.
+        How your Provider is told to write. Rostery always adds the shape of the reply and the rule that song and video titles and Creator names
+        are data, not orders, so an edit here cannot break a Roast. Up to 20,000 characters.
       </p>
       <!-- Set in the serif, like the Roast it asks for. -->
-      <textarea aria-labelledby="prompt-name" rows="18" spellcheck="false" maxlength="20000" bind:value={prompt} oninput={typing} onchange={savePrompt}></textarea>
+      <textarea aria-labelledby="prompt-name" rows="18" dir="auto" spellcheck="false" maxlength="20000" bind:value={prompt} oninput={typing} onchange={savePrompt}></textarea>
       <div class="note">
         <p role="status">{promptNote}</p>
         {#if undo !== undefined}
@@ -360,19 +430,39 @@
   <dialog bind:this={dialog} aria-labelledby="digest-name">
     <h2 id="digest-name">What gets sent</h2>
     <p>
-      This is the exact Digest your Provider gets, along with the system prompt. Rostery has already taken out links, IDs and hidden
-      characters.
+      This is the exact Digest your Provider would get right now, along with the system prompt. Rostery has already taken out most web
+      addresses and IDs, and the characters that can hide text.
     </p>
+    {#if chosen === 'codex'}
+      <p>Codex also sends your own ~/.codex/AGENTS.md, if you have one. Rostery cannot stop that or show it here.</p>
+    {/if}
+    <!-- Mounted before its words change, or a screen reader would not announce them. -->
+    <p class="digest-words" role="status">{digestWords}</p>
     {#if digestProblem}
       <p class="error" role="alert">{digestProblem}</p>
-    {:else if digestLoading}
-      <p>Reading your history</p>
-    {:else if digest === null}
-      <p>There is nothing to send yet. Add your history on the Sources screen, or try the demo data there.</p>
-    {:else}
+    {:else if digest !== null}
       <!-- A tab stop, so a long Digest scrolls by keyboard. Only ever text, because strangers wrote the titles in it. -->
       <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
       <pre tabindex="0" dir="ltr">{digest}</pre>
+      <h3 id="tag-name">Creators to tag first</h3>
+      {#if toTag.length}
+        <p>
+          Before a Roast, your Provider gets these names and their Source, and nothing else, so it can tag them with Interests. Those
+          Interests then join the Digest, so it can change.
+        </p>
+        <!-- A tab stop, for the same reason as the Digest, and text for the same reason. Strangers wrote these names as well. -->
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+        <ul class="to-tag" tabindex="0" aria-labelledby="tag-name">
+          {#each toTag as creator}
+            <li>
+              <span dir="auto">{creator.name}</span>
+              <span class="source">{creator.source === 'spotify' ? 'Spotify' : 'YouTube'}</span>
+            </li>
+          {/each}
+        </ul>
+      {:else}
+        <p>No Creators are waiting to be tagged, so no names go ahead of the Digest.</p>
+      {/if}
     {/if}
     <button tabindex="0" onclick={() => dialog?.close()}>Close</button>
   </dialog>
@@ -492,6 +582,12 @@
     cursor: pointer;
   }
 
+  /* The same ring as everywhere else. WebKit does not count an arrow key as :focus-visible, and that is how a radio group is walked. */
+  input[type='radio']:focus {
+    outline: 2px solid var(--brass);
+    outline-offset: 2px;
+  }
+
   .name {
     font: 500 18px/1.3 var(--serif);
   }
@@ -545,7 +641,7 @@
     width: 100%;
     margin-top: 3px;
     padding: 7px 10px;
-    border: 1px solid var(--rule);
+    border: 1px solid var(--faint);
     border-radius: 6px;
     background: var(--night);
     color: var(--ivory);
@@ -553,7 +649,7 @@
   }
 
   input::placeholder {
-    color: var(--faint);
+    color: var(--dim);
   }
 
   .sends {
@@ -582,12 +678,27 @@
     width: 100%;
     margin-top: 12px;
     padding: 18px 20px;
-    border: 1px solid var(--rule);
+    border: 1px solid var(--faint);
     border-radius: 6px;
     background: var(--panel);
     color: var(--ivory);
     font: 16px/1.6 var(--serif);
     resize: vertical;
+  }
+
+  .reading {
+    margin: 24px 0 0;
+    color: var(--dim);
+  }
+
+  /* Out of the flow while it has nothing to say, so it adds no gap, but still there to be announced. */
+  .reading:empty,
+  .digest-words:empty {
+    position: absolute;
+  }
+
+  .retry {
+    margin-top: 12px;
   }
 
   .note {
@@ -647,10 +758,46 @@
     align-self: flex-end;
   }
 
+  dialog h3 {
+    margin: 4px 0 0;
+    font: 600 16px/1.3 var(--serif);
+  }
+
+  /* Names and not JSON, so these stay in the sans. It takes what the Digest leaves, and a short window scrolls the whole dialog. */
+  .to-tag {
+    flex: 0 1 30%;
+    min-height: 72px;
+    margin: 0;
+    padding: 6px 14px;
+    overflow: auto;
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    background: var(--night);
+    list-style: none;
+  }
+
+  .to-tag li {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 2px 0;
+  }
+
+  .to-tag li span:first-child {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .source {
+    flex: none;
+    color: var(--dim);
+    font-size: 13px;
+  }
+
   /* The one place for a fixed-width face, because this is literal JSON. It wraps, so a long title needs no sideways scroll. */
   pre {
     flex: 1 1 auto;
-    min-height: 0;
+    min-height: 96px;
     margin: 0;
     padding: 12px 14px;
     overflow: auto;

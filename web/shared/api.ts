@@ -4,7 +4,7 @@ import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebview, type DragDropEvent } from '@tauri-apps/api/webview';
 import { open } from '@tauri-apps/plugin-dialog';
 import { openUrl } from '@tauri-apps/plugin-opener';
-import type { Disclosure, FinishedRoast, ImportSummary, ProviderStatus, Settings, StoredRoast, Totals, Universe, UniverseFilter } from './types';
+import type { CreatorToTag, Disclosure, FinishedRoast, ImportSummary, ProviderStatus, Settings, StoredRoast, Totals, Universe, UniverseFilter } from './types';
 
 export const totals = () => invoke<Totals>('totals');
 export const loadDemo = () => invoke<Totals>('load_demo');
@@ -16,6 +16,8 @@ export const generateRoast = () => invoke<FinishedRoast>('generate_roast');
 export const latestRoast = () => invoke<StoredRoast | null>('latest_roast');
 /** The exact Digest as text, or null with no history to send. */
 export const digestPreview = () => invoke<string | null>('digest_preview');
+/** The exact names the next tag step would send, heaviest first. */
+export const creatorsToTag = () => invoke<CreatorToTag[]>('creators_to_tag');
 export const providerStatuses = () => invoke<ProviderStatus[]>('provider_statuses');
 export const providerDisclosure = () => invoke<Disclosure>('provider_disclosure');
 export const getSettings = () => invoke<Settings>('get_settings');
