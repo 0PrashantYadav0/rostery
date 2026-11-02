@@ -32,7 +32,7 @@ Automated:
 - `cargo test -p rostery-core -- --ignored live_` against the real `claude` and `codex` on demo data
 - Local LLM is covered by mock tests here because Ollama is not installed on the dev machine
 
-You: run a Roast on your real history with each Provider you have. Install Ollama and try one model. Read the default prompt in `prompts/roast.md` and change anything that is not funny.
+You: run a Roast on your real history with each Provider you have. Install Ollama and try one model. With its default context length, a Roast should stop and say how to raise it, naming `OLLAMA_CONTEXT_LENGTH`. Raise it and try again, then check that an edit to the system prompt shows in the Roast. Tick the open box in ticket 07 once that works. If you have LM Studio, run two Roasts in a row, because Rostery has not seen whether its token count leaves out what it cached, and that would stop the second one by mistake. Read the default prompt in `prompts/roast.md` and change anything that is not funny.
 
 ## 4. The site can be shared (after tickets 09 to 11)
 

@@ -637,15 +637,17 @@ Ticket 14. Blocked by Tasks 11 and 13.
 
 **Interfaces:**
 - Consumes: everything above.
-- Produces: `Store::wipe()`, command `wipe_everything(confirmation: String)`, which requires the literal `DELETE`, then removes all rows, every keychain entry and the site folder.
+- Produces: `Store::wipe()`, command `wipe_everything(confirmation: String)`, which requires the literal `DELETE`, then removes all rows, every keychain entry and the site folder. Commands `save_local_key(server, key)` and `forget_local_key(server)`.
 
 - [ ] **Step 1: Write failing tests**
 
-`wipe_removes_all_rows`; `wipe_needs_exact_confirmation` (command helper, tested without Tauri). e2e: `first run shows welcome`, `welcome skips after data exists`, `demo path reaches a universe`, `delete everything needs typed confirmation`.
+`wipe_removes_all_rows`; `wipe_needs_exact_confirmation` (command helper, tested without Tauri); `local_key_reaches_the_provider`: a key from `secrets` is set on the Provider that `generate_roast` and `provider_statuses` use. e2e: `first run shows welcome`, `welcome skips after data exists`, `demo path reaches a universe`, `delete everything needs typed confirmation`, `local api key field`.
 
 - [ ] **Step 2: Implement with `frontend-design`**
 
 Welcome flow: what Rostery is in two sentences, add data (Export, Connection or demo), pick a Provider with live status, then Roast me. Every screen says what stays on the machine. `PRIVACY.md` turns the "What leaves the machine" table into a privacy policy, and states how to disconnect and delete, which Spotify's policy requires. Settings gets "Delete everything".
+
+A local Provider's row in Settings gets an API key field, which is the only way to use a server that wants one. `api_key` on `Provider::Local` exists and is sent when present, but Task 7 left nothing setting it, because the keychain only arrives with Task 10. The key goes in `secrets` as `ollama-api-key` or `lm-studio-api-key` and never in the settings JSON. `src-tauri/src/commands.rs` reads it and sets it on the Provider before `llm::complete` and `llm::statuses`. The status and the error that say Rostery cannot send a key yet change to say where to add one, and the `ponytail:` comment on `api_key` goes.
 
 - [ ] **Step 3: Run all checks and commit**
 
