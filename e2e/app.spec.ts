@@ -3111,6 +3111,22 @@ async function openSettings(page: Page) {
 const chosenProvider = (settings: Settings) => Object.keys(settings.provider)[0];
 const providerOf = (settings: Settings, key: string) => [settings.provider, ...settings.others].find((p) => key in p) as Provider;
 
+/** Ollama chosen, and no model yet, which is when a status answer fills one in. */
+const onOllama = (): Settings => {
+  const { provider, others, systemPrompt } = allProviders();
+  return { provider: others[1], systemPrompt, others: [provider, others[0], others[2]] };
+};
+/** Status checks that each wait to be answered. */
+function controlledStatuses() {
+  const answers: ((statuses: ProviderStatus[]) => void)[] = [];
+  return { answers, handler: () => new Promise((resolve) => answers.push(resolve)) };
+}
+const offering = (model: string) =>
+  everyStatus.map((s) => (s.id === 'ollama' ? { ...s, available: true, detail: 'Running at http://127.0.0.1:11434/v1, with 1 model.', models: [model] } : s));
+const leave = (page: Page, screen: string) => page.getByRole('button', { name: screen, exact: true }).click();
+const visibleAlert = (page: Page) => page.locator('main [role="alert"]:visible');
+const NO_DATABASE = 'Rostery could not use its local database.';
+
 test('provider choice persists', async ({ page }) => {
   const mocks = settingsMocks();
   await installMockIpc(page, { ...empty, latest_roast: () => null, ...mocks.handlers });
@@ -3191,6 +3207,212 @@ test('a status check that fails says why, and the rest of the screen still works
   await openSettings(page);
   await expect(page.locator('main [role="alert"]:visible')).toContainText('could not use its local database');
   await expect(page.getByRole('radio', { name: /Codex/ })).toBeEnabled();
+  // Nothing is being asked now, and nothing was answered.
+  await expect(page.getByText('Not known')).toHaveCount(4);
+  await expect(page.getByText('Checking')).toHaveCount(0);
+  await expect(page.locator('.lamp.wait')).toHaveCount(0);
+  await expect(page.getByText('Asked just now.')).toHaveCount(0);
+});
+
+test('a line about where the Digest goes that fails says why, and the Providers still get checked', async ({ page }) => {
+  await installMockIpc(page, {
+    ...withHistory,
+    ...settingsMocks().handlers,
+    provider_disclosure: () => {
+      throw new Error(NO_DATABASE);
+    },
+  });
+  await openSettings(page);
+  await expect(page.getByText('Logged in.', { exact: true })).toBeVisible();
+  await expect(page.getByText('Asked just now.')).toBeVisible();
+  await expect(visibleAlert(page)).toHaveText(NO_DATABASE);
+});
+
+test('a status answer reaching a Settings screen that has gone changes nothing', async ({ page }) => {
+  const mocks = settingsMocks(onOllama());
+  const statuses = controlledStatuses();
+  await installMockIpc(page, { ...withHistory, ...mocks.handlers, provider_statuses: statuses.handler });
+  await openSettings(page);
+  await expect.poll(() => statuses.answers.length).toBe(1);
+
+  // Away, back and on to another Provider, with the first check still out.
+  await leave(page, 'Sources');
+  await leave(page, 'Settings');
+  await expect.poll(() => statuses.answers.length).toBe(2);
+  const codex = page.getByRole('radio', { name: /Codex/ });
+  await codex.check();
+  await expect.poll(() => chosenProvider(mocks.state.saved)).toBe('codex');
+
+  statuses.answers[0](offering('tiny'));
+  // What is being looked for is a save that does not come, so it gets time to.
+  await page.waitForTimeout(300);
+  expect(mocks.state.saves.map(chosenProvider)).toEqual(['codex']);
+  await expect(codex).toBeChecked();
+});
+
+test('a save still on its way when Settings opens again is built on and not undone', async ({ page }) => {
+  const mocks = settingsMocks();
+  let finish = () => {};
+  await installMockIpc(page, {
+    ...withHistory,
+    ...mocks.handlers,
+    save_settings: ({ settings }: { settings: Settings }) =>
+      new Promise((resolve) => {
+        finish = () => {
+          mocks.state.saved = settings;
+          resolve(settings);
+        };
+        // Only the first waits, the way a database stays locked for a while.
+        if (mocks.state.saved.systemPrompt) finish();
+      }),
+  });
+  await openSettings(page);
+  const box = page.getByRole('textbox', { name: 'System prompt' });
+  await box.fill('Speak only of soup.');
+  await leave(page, 'Roast');
+  await leave(page, 'Settings');
+  await page.waitForTimeout(100);
+  finish();
+
+  await expect(box).toHaveValue('Speak only of soup.');
+  await page.getByRole('radio', { name: /Codex/ }).check();
+  await expect.poll(() => chosenProvider(mocks.state.saved)).toBe('codex');
+  expect(mocks.state.saved.systemPrompt).toBe('Speak only of soup.');
+});
+
+test('a read reaching a Settings screen that has gone changes nothing', async ({ page }) => {
+  const mocks = settingsMocks();
+  const before = mocks.state.saved;
+  let firstRead: (settings: Settings) => void = () => {};
+  let reads = 0;
+  await installMockIpc(page, {
+    ...withHistory,
+    ...mocks.handlers,
+    get_settings: () => ((reads += 1) === 1 ? new Promise((resolve) => (firstRead = resolve)) : mocks.state.saved),
+  });
+  await openSettings(page);
+  await expect.poll(() => reads).toBe(1);
+  await leave(page, 'Sources');
+  await leave(page, 'Settings');
+  await page.getByRole('radio', { name: /Codex/ }).check();
+  await expect.poll(() => chosenProvider(mocks.state.saved)).toBe('codex');
+
+  firstRead(before);
+  await page.waitForTimeout(100);
+  const model = page.getByRole('combobox', { name: 'Model' });
+  await model.fill('gpt-test');
+  await model.blur();
+  await expect.poll(() => providerOf(mocks.state.saved, 'codex')).toEqual({ codex: { model: 'gpt-test' } });
+  expect(chosenProvider(mocks.state.saved)).toBe('codex');
+});
+
+test('a status answer leaves alone a model being typed, and fills in one left empty', async ({ page }) => {
+  const mocks = settingsMocks(onOllama());
+  const statuses = controlledStatuses();
+  await installMockIpc(page, { ...withHistory, ...mocks.handlers, provider_statuses: statuses.handler });
+  await openSettings(page);
+  await expect.poll(() => statuses.answers.length).toBe(1);
+
+  const model = page.getByRole('combobox', { name: 'Model' });
+  await model.click();
+  await page.keyboard.type('my-own-mo');
+  statuses.answers[0](offering('first-model'));
+  await expect(page.getByText('with 1 model.')).toBeVisible();
+  await expect(model).toHaveValue('my-own-mo');
+  await page.keyboard.type('del');
+  await model.blur();
+  await expect.poll(() => (providerOf(mocks.state.saved, 'local') as any).local.model).toBe('my-own-model');
+  expect(JSON.stringify(mocks.state.saves)).not.toContain('first-model');
+
+  // Looking in the box and typing nothing is not a choice, and a Roast cannot start with no model.
+  mocks.state.saved = onOllama();
+  await page.goto('/');
+  await leave(page, 'Settings');
+  await expect.poll(() => statuses.answers.length).toBe(2);
+  await model.click();
+  statuses.answers[1](offering('first-model'));
+  await expect(page.getByText('with 1 model.')).toBeVisible();
+  await expect(model).toHaveValue('');
+  await model.blur();
+  await expect(model).toHaveValue('first-model');
+  await expect.poll(() => (providerOf(mocks.state.saved, 'local') as any).local.model).toBe('first-model');
+});
+
+test('a status answer leaves alone a model on its way to being saved', async ({ page }) => {
+  const mocks = settingsMocks(onOllama());
+  const statuses = controlledStatuses();
+  let saves = 0;
+  let finish = () => {};
+  await installMockIpc(page, {
+    ...withHistory,
+    ...mocks.handlers,
+    provider_statuses: statuses.handler,
+    save_settings: ({ settings }: { settings: Settings }) => {
+      saves += 1;
+      return new Promise((resolve) => {
+        finish = () => {
+          mocks.state.saved = settings;
+          resolve(settings);
+        };
+      });
+    },
+  });
+  await openSettings(page);
+  await expect.poll(() => statuses.answers.length).toBe(1);
+
+  const model = page.getByRole('combobox', { name: 'Model' });
+  await model.fill('my-own-model');
+  await model.blur();
+  await expect.poll(() => saves).toBe(1);
+  statuses.answers[0](offering('first-model'));
+  await expect(page.getByText('with 1 model.')).toBeVisible();
+  finish();
+  await expect.poll(() => (providerOf(mocks.state.saved, 'local') as any).local.model).toBe('my-own-model');
+  await page.waitForTimeout(300);
+  expect(saves).toBe(1);
+});
+
+test('a Provider choice that fails says why, stays where it was, and the next one works', async ({ page }) => {
+  const mocks = settingsMocks();
+  let broken = true;
+  await installMockIpc(page, {
+    ...withHistory,
+    ...mocks.handlers,
+    save_settings: ({ settings }: { settings: Settings }) => {
+      if (broken) throw new Error(NO_DATABASE);
+      mocks.state.saved = settings;
+      return settings;
+    },
+  });
+  await openSettings(page);
+  await expect(page.getByText('Asked just now.')).toBeVisible();
+  await page.getByRole('radio', { name: /Codex/ }).click();
+  await expect(visibleAlert(page)).toHaveText(NO_DATABASE);
+  await expect(page.getByRole('radio', { name: /Claude Code/ })).toBeChecked();
+
+  broken = false;
+  await page.getByRole('radio', { name: /Codex/ }).check();
+  await expect.poll(() => chosenProvider(mocks.state.saved)).toBe('codex');
+  await expect(visibleAlert(page)).toHaveCount(0);
+});
+
+test('an import that fails while Settings is open says so there', async ({ page }) => {
+  let fail: (e: Error) => void = () => {};
+  await installMockIpc(page, {
+    ...empty,
+    latest_roast: () => null,
+    ...settingsMocks().handlers,
+    'plugin:dialog|open': () => ['/d/notes.json'],
+    import_paths: () => new Promise((_, reject) => (fail = reject)),
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Choose file' }).click();
+  await expect(page.getByRole('button', { name: 'Choose file' })).toHaveAttribute('aria-disabled', 'true');
+  await leave(page, 'Settings');
+  await expect(page.getByRole('heading', { level: 1, name: 'Settings' })).toBeVisible();
+
+  fail(new Error('Rostery did not find a Spotify or YouTube Export there.'));
+  await expect(visibleAlert(page)).toHaveText('Rostery did not find a Spotify or YouTube Export there.');
 });
 
 test('the model and address of a Provider are saved and survive trying another', async ({ page }) => {
@@ -3280,6 +3502,55 @@ test('an address that is refused says why, and keeps what was typed', async ({ p
   await expect.poll(() => mocks.state.saved.systemPrompt).toBe('Be gentle.');
 });
 
+test('a refused address keeps its warning until it is put right or the Provider changes', async ({ page }) => {
+  const mocks = settingsMocks(onOllama());
+  const refused = 'Rostery cannot use the address "nope". It should look like http://127.0.0.1:11434/v1, with no name or password in it.';
+  let statuses = everyStatus;
+  await installMockIpc(page, {
+    ...withHistory,
+    ...mocks.handlers,
+    provider_statuses: () => statuses,
+    save_settings: ({ settings }: { settings: Settings }) => {
+      if (JSON.stringify(settings).includes('nope')) throw new Error(refused);
+      mocks.state.saved = settings;
+      return settings;
+    },
+  });
+  await openSettings(page);
+  await expect(page.getByText('Asked just now.')).toBeVisible();
+  const address = page.getByRole('textbox', { name: 'Server address' });
+  const alert = page.getByRole('alert');
+  await address.fill('nope');
+  await address.blur();
+  await expect(alert).toHaveText(refused);
+
+  // A model saved by hand or by a status answer says nothing about the address.
+  const model = page.getByRole('combobox', { name: 'Model' });
+  await model.fill('tiny');
+  await model.blur();
+  await expect.poll(() => JSON.stringify(mocks.state.saved)).toContain('tiny');
+  await expect(alert).toHaveText(refused);
+  await expect(address).toHaveValue('nope');
+  await model.fill('');
+  await model.blur();
+  await expect.poll(() => JSON.stringify(mocks.state.saved)).not.toContain('tiny');
+  statuses = offering('first-model');
+  await page.getByRole('button', { name: 'Check again' }).click();
+  await expect(model).toHaveValue('first-model');
+  await expect.poll(() => JSON.stringify(mocks.state.saved)).toContain('first-model');
+  await expect(alert).toHaveText(refused);
+
+  await address.fill('http://127.0.0.1:11435/v1');
+  await address.blur();
+  await expect(alert).toHaveCount(0);
+
+  await address.fill('nope');
+  await address.blur();
+  await expect(alert).toHaveText(refused);
+  await page.getByRole('radio', { name: /Codex/ }).check();
+  await expect(alert).toHaveCount(0);
+});
+
 test('digest preview opens', async ({ page }) => {
   const digest = '{\n  "today": "2027-01-15",\n  "spotify": {\n    "plays": 944\n  }\n}';
   await installMockIpc(page, { ...withHistory, ...settingsMocks().handlers, digest_preview: () => digest });
@@ -3289,16 +3560,21 @@ test('digest preview opens', async ({ page }) => {
   await button.focus();
   await page.keyboard.press('Enter');
   const dialog = page.getByRole('dialog', { name: 'What gets sent' });
+  const close = dialog.getByRole('button', { name: 'Close' });
   await expect(dialog).toBeVisible();
   // Exactly what came from Rust, line for line.
   expect(await dialog.locator('pre').evaluate((node) => node.textContent)).toBe(digest);
+  await expect(close).toBeFocused();
 
-  await dialog.getByRole('button', { name: 'Close' }).click();
+  await close.click();
   await expect(dialog).toBeHidden();
   await expect(button).toBeFocused();
 
+  // Every time, with what the last time left in there gone first.
   await page.keyboard.press('Enter');
   await expect(dialog).toBeVisible();
+  await expect(dialog.locator('pre')).toBeVisible();
+  await expect(close).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(dialog).toBeHidden();
   await expect(button).toBeFocused();
@@ -3319,6 +3595,24 @@ test('with no history the preview says so, and a failure says why', async ({ pag
   };
   await page.getByRole('button', { name: 'See what gets sent' }).click();
   await expect(dialog.getByRole('alert')).toContainText('could not use its local database');
+  await dialog.getByRole('button', { name: 'Close' }).click();
+
+  // Going from a Digest to nothing to send and to one still being read, focus stays in the dialog.
+  preview = () => '{}';
+  await page.getByRole('button', { name: 'See what gets sent' }).click();
+  await expect(dialog.locator('pre')).toBeVisible();
+  await dialog.getByRole('button', { name: 'Close' }).click();
+  for (const next of [() => null, () => new Promise(() => {})]) {
+    preview = next;
+    await page.getByRole('button', { name: 'See what gets sent' }).click();
+    await expect(dialog.locator('pre')).toHaveCount(0);
+    await expect(dialog.getByRole('button', { name: 'Close' })).toBeFocused();
+    await dialog.getByRole('button', { name: 'Close' }).click();
+    preview = () => '{}';
+    await page.getByRole('button', { name: 'See what gets sent' }).click();
+    await expect(dialog.locator('pre')).toBeVisible();
+    await dialog.getByRole('button', { name: 'Close' }).click();
+  }
 });
 
 test('a Digest with a hostile or very long title stays text and stays inside the dialog', async ({ page }) => {
@@ -3397,8 +3691,12 @@ test('a system prompt that is too long says so, and what was typed stays to shor
   await openSettings(page);
   const box = page.getByRole('textbox', { name: 'System prompt' });
   const long = 'x'.repeat(20_001);
-  await box.fill(long);
-  await box.blur();
+  // Typing and pasting stop at the limit, so this goes past the box to reach what Rust says.
+  await box.evaluate((node: HTMLTextAreaElement, text) => {
+    node.value = text;
+    node.dispatchEvent(new Event('input', { bubbles: true }));
+    node.dispatchEvent(new Event('change', { bubbles: true }));
+  }, long);
 
   await expect(page.getByRole('alert')).toHaveText(refused);
   await expect(box).toHaveValue(long);
@@ -3412,6 +3710,148 @@ test('a system prompt that is too long says so, and what was typed stays to shor
   await page.getByRole('button', { name: 'Reset to default' }).click();
   await expect(box).toHaveValue(defaultVoice);
   await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
+test('typing and pasting into the system prompt stop at the limit', async ({ page }) => {
+  await installMockIpc(page, { ...withHistory, ...settingsMocks().handlers });
+  await openSettings(page);
+  const box = page.getByRole('textbox', { name: 'System prompt' });
+  await box.fill('x'.repeat(20_001));
+  await expect(box).toHaveValue('x'.repeat(20_000));
+  await expect(page.getByText('Up to 20,000 characters.')).toBeVisible();
+});
+
+test('a system prompt that could not be saved on the way out says so on the next screen, and comes back', async ({ page }) => {
+  const mocks = settingsMocks();
+  let broken = true;
+  await installMockIpc(page, {
+    ...withHistory,
+    ...mocks.handlers,
+    save_settings: ({ settings }: { settings: Settings }) => {
+      if (broken) throw new Error(NO_DATABASE);
+      mocks.state.saved = settings;
+      return settings;
+    },
+  });
+  await openSettings(page);
+  const box = page.getByRole('textbox', { name: 'System prompt' });
+  await box.fill('Speak only of soup.');
+  await leave(page, 'Roast');
+
+  await expect(page.getByRole('heading', { level: 1, name: 'Roast' })).toBeVisible();
+  await expect(visibleAlert(page)).toContainText('Your last change in Settings was not saved');
+  await expect(visibleAlert(page)).toContainText(NO_DATABASE);
+  // Until it can be put right, wherever the person goes.
+  await leave(page, 'Sources');
+  await expect(visibleAlert(page)).toContainText(NO_DATABASE);
+
+  await leave(page, 'Settings');
+  await expect(box).toHaveValue('Speak only of soup.');
+  await expect(visibleAlert(page)).toHaveText(NO_DATABASE);
+  expect(mocks.state.saved.systemPrompt).toBe(null);
+
+  // Still not saved, so leaving tries again, and this time it works.
+  broken = false;
+  await leave(page, 'Roast');
+  await expect.poll(() => mocks.state.saved.systemPrompt).toBe('Speak only of soup.');
+  await expect(visibleAlert(page)).toHaveCount(0);
+});
+
+test('a system prompt that could not be saved on the way out is saved on coming back', async ({ page }) => {
+  const mocks = settingsMocks();
+  let broken = true;
+  await installMockIpc(page, {
+    ...withHistory,
+    ...mocks.handlers,
+    save_settings: ({ settings }: { settings: Settings }) => {
+      if (broken) throw new Error(NO_DATABASE);
+      mocks.state.saved = settings;
+      return settings;
+    },
+  });
+  await openSettings(page);
+  const box = page.getByRole('textbox', { name: 'System prompt' });
+  await box.fill('Speak only of soup.');
+  await leave(page, 'Roast');
+  await expect(visibleAlert(page)).toContainText(NO_DATABASE);
+
+  broken = false;
+  await leave(page, 'Settings');
+  await expect(box).toHaveValue('Speak only of soup.');
+  await expect.poll(() => mocks.state.saved.systemPrompt).toBe('Speak only of soup.');
+  await expect(page.getByText('Saved. The next Roast uses this.')).toBeVisible();
+  await expect(visibleAlert(page)).toHaveCount(0);
+});
+
+test('a newer system prompt saved on the way out is not undone by an older one that failed', async ({ page }) => {
+  const mocks = settingsMocks();
+  const saving: { settings: Settings; finish: (error?: Error) => void }[] = [];
+  await installMockIpc(page, {
+    ...withHistory,
+    ...mocks.handlers,
+    save_settings: ({ settings }: { settings: Settings }) =>
+      new Promise((resolve, reject) => {
+        saving.push({
+          settings,
+          finish: (error) => {
+            if (error) return reject(error);
+            mocks.state.saved = settings;
+            resolve(settings);
+          },
+        });
+      }),
+  });
+  await openSettings(page);
+  const box = page.getByRole('textbox', { name: 'System prompt' });
+  await box.fill('First go.');
+  await box.blur();
+  await expect.poll(() => saving.length).toBe(1);
+  await box.fill('Second go.');
+  await leave(page, 'Roast');
+  await expect(page.getByRole('heading', { level: 1, name: 'Roast' })).toBeVisible();
+
+  saving[0].finish(new Error(NO_DATABASE));
+  await expect.poll(() => saving.length).toBe(2);
+  saving[1].finish();
+  await expect.poll(() => mocks.state.saved.systemPrompt).toBe('Second go.');
+  await expect(visibleAlert(page)).toHaveCount(0);
+
+  await leave(page, 'Settings');
+  await expect(box).toHaveValue('Second go.');
+  expect(saving).toHaveLength(2);
+});
+
+test('an address refused on the way out says so on the next screen', async ({ page }) => {
+  const mocks = settingsMocks(onOllama());
+  const refused = 'Rostery cannot use the address "nope". It should look like http://127.0.0.1:11434/v1, with no name or password in it.';
+  await installMockIpc(page, {
+    ...withHistory,
+    ...mocks.handlers,
+    save_settings: ({ settings }: { settings: Settings }) => {
+      if (JSON.stringify(settings).includes('nope')) throw new Error(refused);
+      mocks.state.saved = settings;
+      return settings;
+    },
+  });
+  await openSettings(page);
+  const address = page.getByRole('textbox', { name: 'Server address' });
+  await address.fill('nope');
+  await leave(page, 'Roast');
+  await expect(visibleAlert(page)).toContainText(refused);
+
+  // Back where it can be put right, it says so once more, and then it is done with.
+  await leave(page, 'Settings');
+  await expect(visibleAlert(page)).toHaveText(refused);
+  await leave(page, 'Sources');
+  await expect(visibleAlert(page)).toHaveCount(0);
+
+  // Refused and read, then left with the box still holding it, and that box is going.
+  await leave(page, 'Settings');
+  await address.fill('nope');
+  await address.blur();
+  await expect(visibleAlert(page)).toHaveText(refused);
+  await leave(page, 'Roast');
+  await expect(visibleAlert(page)).toContainText(refused);
 });
 
 test('a blank system prompt goes back to the default, and what is typed during a save stays', async ({ page }) => {

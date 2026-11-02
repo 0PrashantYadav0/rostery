@@ -2,7 +2,7 @@
   import { tick } from 'svelte';
   import { roastRun as run } from './roast-run.svelte';
   import Roast from './screens/Roast.svelte';
-  import Settings from './screens/Settings.svelte';
+  import Settings, { unsaved } from './screens/Settings.svelte';
   import Sources from './screens/Sources.svelte';
   import Universe from './screens/Universe.svelte';
 
@@ -76,6 +76,12 @@
   <!-- A tab stop, because a long Roast has nothing else to hold focus while it scrolls by keyboard. -->
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
   <main tabindex="0" bind:this={scroller}>
+    <!-- Out here, because the screen it is about has gone and any of the others can be next. Settings says it for itself. -->
+    {#if unsaved.why && screen !== 'Settings'}
+      <p class="unsaved" role="alert">
+        Your last change in Settings was not saved, so the next Roast will not use it. {unsaved.why} Open Settings to try again.
+      </p>
+    {/if}
     <!-- Sources stays mounted, so an import keeps its place and its result while you look elsewhere. -->
     <Sources
       active={screen === 'Sources'}
@@ -89,7 +95,7 @@
     {:else if screen === 'Roast'}
       <Roast {importing} {missedError} {stored} onsources={goToSources} />
     {:else if screen === 'Settings'}
-      <Settings />
+      <Settings {missedError} />
     {/if}
   </main>
 </div>
@@ -204,6 +210,19 @@
     }
   }
 
+  /* Stays in sight, because a person can be down a long Roast when this arrives. */
+  .unsaved {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    margin: 0;
+    padding: 12px 48px;
+    border-bottom: 1px solid var(--rule);
+    background: var(--night);
+    color: #f08a7e;
+    overflow-wrap: anywhere;
+  }
+
   main {
     overflow: auto;
     background: radial-gradient(ellipse 80% 60% at 70% 0%, #172036, transparent 70%);
@@ -226,6 +245,9 @@
     }
     .mark {
       margin: 0 0 8px 16px;
+    }
+    .unsaved {
+      padding: 12px 24px;
     }
     ul {
       flex-direction: row;

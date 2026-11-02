@@ -1,8 +1,23 @@
+<script module lang="ts">
+  import type { Settings } from '../../shared/types';
+
+  // Out here, because a save can outlast the screen that asked for it, and the next screen has to build
+  // on what that save left and not on what it read before.
+  /** What is saved. A refused edit never gets in here, so it cannot hold up the next change. */
+  let settings = $state.raw<Settings>();
+  let queue: Promise<unknown> = Promise.resolve();
+
+  /** A save that failed with no screen left to say so, and the prompt it held, which took someone a while to write. */
+  export const unsaved = $state<{ why: string; prompt?: string }>({ why: '' });
+</script>
+
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { defaultSystemPrompt, digestPreview, errorMessage, getSettings, providerStatuses, saveSettings } from '../../shared/api';
-  import type { Provider, ProviderId, ProviderStatus, Settings } from '../../shared/types';
+  import type { Provider, ProviderId, ProviderStatus } from '../../shared/types';
   import { roastRun as run } from '../roast-run.svelte';
+
+  let { missedError }: { missedError: string } = $props();
 
   const cards: { id: ProviderId; name: string }[] = [
     { id: 'claude-code', name: 'Claude Code' },
@@ -11,14 +26,18 @@
     { id: 'lm-studio', name: 'LM Studio' },
   ];
 
-  /** What is saved. A refused edit never gets in here, so it cannot hold up the next change. */
-  let settings = $state.raw<Settings>();
+  /** Set once this screen has read what is saved, which everything below it waits for. */
   let chosen = $state<ProviderId>();
   let statuses = $state.raw<ProviderStatus[]>([]);
   let checking = $state(false);
   let checked = $state(false);
   let problem = $state('');
-  let fieldProblem = $state('');
+  let checkProblem = $state('');
+  let addressProblem = $state('');
+  let modelProblem = $state('');
+  let modelBox = $state<HTMLInputElement>();
+  /** An answer can arrive after the screen has gone, and has nothing left to change by then. */
+  let destroyed = false;
 
   let defaultPrompt = $state('');
   let prompt = $state('');
@@ -26,6 +45,8 @@
   let promptProblem = $state('');
   /** What Reset took away, for as long as Undo is offered. */
   let undo = $state<string>();
+  /** What a save is on its way with, so leaving does not send the same text twice. */
+  let saving: string | undefined;
 
   let resetButton = $state<HTMLElement>();
   let dialog = $state<HTMLDialogElement>();
@@ -44,10 +65,12 @@
         ? { codex: { model: model || null } }
         : { local: { ...p.local, model } };
   const statusOf = (id: ProviderId) => statuses.find((s) => s.id === id);
+  const bringIntoView = (node: HTMLElement) => node.scrollIntoView({ block: 'nearest' });
 
-  // One save at a time, each on top of the last, so two quick changes cannot undo each other in Rust.
-  let queue: Promise<unknown> = Promise.resolve();
-  /** Saves a change to what is saved now. Resolves to why it was refused, or to nothing. */
+  /**
+   * Saves a change to what is saved now. Resolves to why it was refused, or to nothing. One at a time, each
+   * on top of the last, so two quick changes cannot undo each other in Rust.
+   */
   function update(change: (s: Settings) => Settings) {
     const done = queue.then(async () => {
       try {
@@ -55,7 +78,9 @@
         await run.loadDisclosure();
         return '';
       } catch (e) {
-        return errorMessage(e);
+        const why = errorMessage(e);
+        if (destroyed) unsaved.why = why;
+        return why;
       }
     });
     queue = done;
@@ -65,42 +90,48 @@
   // The last answer wins, so an old check cannot paint over a newer address.
   let latestCheck = 0;
   async function check() {
+    if (destroyed) return;
     const asked = (latestCheck += 1);
     checking = true;
     try {
       const answer = await providerStatuses();
       if (asked !== latestCheck) return;
       statuses = answer;
-      problem = '';
+      checkProblem = '';
+      checked = true;
       fillModel();
     } catch (e) {
-      if (asked === latestCheck) problem = errorMessage(e);
+      if (asked !== latestCheck) return;
+      checkProblem = errorMessage(e);
+      checked = false;
     }
-    if (asked !== latestCheck) return;
     checking = false;
-    checked = true;
   }
 
-  /** A local Provider cannot start with no model, so it takes the first its server has until told otherwise. */
+  /**
+   * A local Provider cannot start with no model, so it takes the first its server has until told otherwise.
+   * What is in the box may not be saved yet, and a person in the box may be about to tell it otherwise.
+   */
   function fillModel() {
-    if (!settings || !chosen || chosen === 'claude-code' || chosen === 'codex') return;
+    if (destroyed || !chosen || chosen === 'claude-code' || chosen === 'codex') return;
+    if (modelBox?.value || document.activeElement === modelBox) return;
     const first = statusOf(chosen)?.models[0];
     if (first && !modelOf(setup(chosen))) setModel(first);
   }
 
   function setModel(model: string) {
-    update((s) => ({ ...s, provider: withModel(s.provider, model) })).then((why) => (fieldProblem = why));
+    update((s) => ({ ...s, provider: withModel(s.provider, model) })).then((why) => (modelProblem = why));
   }
 
   async function setAddress(baseUrl: string) {
     const why = await update((s) => ('local' in s.provider ? { ...s, provider: { local: { ...s.provider.local, baseUrl } } } : s));
-    fieldProblem = why;
+    addressProblem = why;
     // A status is about the address that was saved, so one that was refused changes nothing there.
     if (!why) check();
   }
 
   async function choose(id: ProviderId) {
-    fieldProblem = '';
+    problem = addressProblem = modelProblem = '';
     const why = await update((s) => {
       const all = [s.provider, ...s.others];
       return { ...s, provider: all.find((p) => idOf(p) === id)!, others: all.filter((p) => idOf(p) !== id) };
@@ -116,10 +147,16 @@
   const promptSaved = () => settings!.systemPrompt ?? defaultPrompt;
 
   async function savePrompt() {
-    if (prompt === promptSaved()) return;
+    if (prompt === promptSaved() || prompt === saving) return;
     undo = undefined;
-    const sent = prompt;
+    const sent = (saving = prompt);
     const why = await update((s) => ({ ...s, systemPrompt: sent }));
+    saving = undefined;
+    // With two saves out, the last to land is the one that says how it ended, so an older text cannot come back.
+    if (destroyed && (why || unsaved.prompt !== undefined)) {
+      unsaved.why = why;
+      unsaved.prompt = why ? sent : undefined;
+    }
     promptProblem = why;
     promptNote = why ? '' : settings!.systemPrompt === null ? 'Back to the default prompt.' : 'Saved. The next Roast uses this.';
     // Blank comes back as the default, which is what goes in the box. Unless someone has typed since.
@@ -154,6 +191,8 @@
     digest = null;
     digestProblem = '';
     digestLoading = true;
+    // The last Digest has to go first. It would take focus as the dialog opened, then drop it to the page.
+    await tick();
     dialog?.showModal();
     try {
       digest = await digestPreview();
@@ -166,22 +205,33 @@
   onMount(() => {
     (async () => {
       try {
+        // What a save from the last time here leaves is what there is to read.
+        await queue;
         const [saved, voice] = await Promise.all([getSettings(), defaultSystemPrompt()]);
+        if (destroyed) return;
         settings = saved;
         chosen = idOf(saved.provider);
         defaultPrompt = voice;
-        prompt = promptSaved();
-        await run.loadDisclosure();
+        prompt = unsaved.prompt ?? promptSaved();
+        // A prompt is back in its box, and trying again says whether it is saved now. Anything else has only its reason left.
+        if (unsaved.prompt === undefined) problem = unsaved.why;
+        else savePrompt();
+        unsaved.why = '';
+        unsaved.prompt = undefined;
       } catch (e) {
         problem = errorMessage(e);
         return;
       }
-      // Not waited for, because the screen is ready and these can take seconds.
+      // Neither waited for, because the screen is ready and the first can take seconds.
       check();
+      run.loadDisclosure().catch((e) => (problem = errorMessage(e)));
     })();
-    // Leaving is not always a blur, because a dropped file changes the screen by itself.
     return () => {
-      if (settings && prompt !== promptSaved()) savePrompt();
+      destroyed = true;
+      // The box that still holds what was refused is going, so its message goes on to the next screen.
+      unsaved.why = addressProblem || modelProblem || unsaved.why;
+      // Leaving is not always a blur, because a dropped file changes the screen by itself.
+      if (chosen && prompt !== promptSaved()) savePrompt();
     };
   });
 </script>
@@ -192,11 +242,12 @@
     <p>Choose who writes your Roast, and how they are told to write it.</p>
   </header>
 
-  {#if problem}
-    <p class="error" role="alert">{problem}</p>
-  {/if}
+  {#each [missedError, problem, checkProblem].filter(Boolean) as message}
+    <!-- A person can be further down, at the prompt, when this arrives. -->
+    <p class="error" role="alert" use:bringIntoView>{message}</p>
+  {/each}
 
-  {#if settings}
+  {#if chosen}
     <section aria-labelledby="provider-name">
       <div class="heading">
         <h2 id="provider-name">Provider</h2>
@@ -220,8 +271,8 @@
               <input type="radio" name="provider" tabindex="0" value={id} bind:group={chosen} onchange={() => choose(id)} />
               <span class="name">{name}</span>
               <span class="state">
-                <span class="lamp" class:on={status?.available && status.signedIn} class:wait={!status} aria-hidden="true"></span>
-                <span>{status?.detail ?? 'Checking'}</span>
+                <span class="lamp" class:on={status?.available && status.signedIn} class:wait={!status && checking} aria-hidden="true"></span>
+                <span>{status?.detail ?? (checking ? 'Checking' : 'Not known')}</span>
               </span>
             </label>
             {#if chosen === id}
@@ -237,10 +288,14 @@
                       onchange={(e) => setAddress(e.currentTarget.value)}
                     />
                   </label>
+                  {#if addressProblem}
+                    <p class="error" role="alert">{addressProblem}</p>
+                  {/if}
                 {/if}
                 <label>
                   <span>Model</span>
                   <input
+                    bind:this={modelBox}
                     value={modelOf(provider)}
                     list="models"
                     spellcheck="false"
@@ -248,6 +303,7 @@
                     autocomplete="off"
                     placeholder={'local' in provider ? 'Needed before a Roast can start' : `Leave empty for what ${name} uses by default`}
                     onchange={(e) => setModel(e.currentTarget.value)}
+                    onblur={fillModel}
                   />
                 </label>
                 <datalist id="models">
@@ -255,8 +311,8 @@
                     <option value={model}></option>
                   {/each}
                 </datalist>
-                {#if fieldProblem}
-                  <p class="error" role="alert">{fieldProblem}</p>
+                {#if modelProblem}
+                  <p class="error" role="alert">{modelProblem}</p>
                 {/if}
               </div>
             {/if}
@@ -278,10 +334,10 @@
       </div>
       <p class="about">
         How your Provider is told to write. Rostery always adds the shape of the reply and the rule that song titles and names are data,
-        not orders, so an edit here cannot break a Roast.
+        not orders, so an edit here cannot break a Roast. Up to 20,000 characters.
       </p>
       <!-- Set in the serif, like the Roast it asks for. -->
-      <textarea aria-labelledby="prompt-name" rows="18" spellcheck="false" bind:value={prompt} oninput={typing} onchange={savePrompt}></textarea>
+      <textarea aria-labelledby="prompt-name" rows="18" spellcheck="false" maxlength="20000" bind:value={prompt} oninput={typing} onchange={savePrompt}></textarea>
       <div class="note">
         <p role="status">{promptNote}</p>
         {#if undo !== undefined}
