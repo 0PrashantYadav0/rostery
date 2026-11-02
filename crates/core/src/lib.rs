@@ -5,6 +5,7 @@ pub mod demo;
 pub mod digest;
 pub mod error;
 pub mod ingest;
+pub mod interests;
 pub mod llm;
 pub mod model;
 pub mod roast;

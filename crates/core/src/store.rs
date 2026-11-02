@@ -1,8 +1,9 @@
 use crate::error::{Error, Result};
 use crate::model::{Affinity, InterestMap, Origin, Play, Source, SourceTotals, Totals};
 use crate::roast::{FinishedRoast, Roast, StoredRoast};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{de::DeserializeOwned, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
@@ -55,6 +56,12 @@ CREATE TABLE IF NOT EXISTS settings (
 
 /// Affinities have no Origin of their own, so this `kind` is what marks a demo one.
 pub const DEMO_KIND: &str = "demo";
+/// The `origin` of an Interest a Provider wrote.
+const AI_ORIGIN: &str = "ai";
+/// An AI row with this for its Interest says a Provider answered and had no tags for that Creator, so
+/// it is not asked again. In this table so that whatever clears a Creator's tags clears this too, and
+/// `Store::interests` is the one thing that reads the table and leaves it out.
+const NO_TAGS: &str = "";
 
 pub struct Store {
     conn: Connection,
@@ -282,6 +289,16 @@ impl Store {
     /// Returns how many Plays went.
     pub fn delete_demo(&mut self) -> Result<u64> {
         let tx = self.conn.transaction()?;
+        // First, while the demo is there to say who it was about. A real Creator with a demo name would
+        // lose a tag here, which only means being asked about once more.
+        tx.execute(
+            &format!(
+                "DELETE FROM interests WHERE origin = '{AI_ORIGIN}' AND (source, creator) IN (
+                    SELECT source, creator FROM plays WHERE origin = 'demo'
+                    UNION SELECT source, creator FROM affinities WHERE kind = ?1)"
+            ),
+            [DEMO_KIND],
+        )?;
         let plays = tx.execute("DELETE FROM plays WHERE origin = 'demo'", [])?;
         tx.execute("DELETE FROM interests WHERE origin = 'demo'", [])?;
         tx.execute("DELETE FROM affinities WHERE kind = ?1", [DEMO_KIND])?;
@@ -349,9 +366,10 @@ impl Store {
 
     /// Every origin's Interests together, since a tag means the same wherever it came from.
     pub fn interests(&self) -> Result<InterestMap> {
-        let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT source, creator, interest FROM interests ORDER BY interest",
-        )?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT DISTINCT source, creator, interest FROM interests WHERE interest <> '{NO_TAGS}'
+             ORDER BY interest"
+        ))?;
         let mut rows = stmt.query([])?;
         let mut all = InterestMap::new();
         while let Some(r) = rows.next()? {
@@ -394,6 +412,82 @@ impl Store {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Who a Provider has answered about, tags or not.
+    pub fn ai_asked(&self) -> Result<HashSet<(Source, String)>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT DISTINCT source, creator FROM interests WHERE origin = '{AI_ORIGIN}'"
+        ))?;
+        let rows = stmt.query_map([], |r| {
+            let source: String = r.get(0)?;
+            Ok((
+                Source::from_db(&source).ok_or_else(|| unknown(0, "source", &source))?,
+                r.get(1)?,
+            ))
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// What a Provider said about each Creator it was asked about, where saying nothing still counts
+    /// as asked. One transaction, so a reply lands whole, and only for a Creator still stored: the
+    /// Provider takes a while, and an AI tag for a made-up artist must not outlive the demo it came with.
+    pub fn keep_ai_interests(
+        &mut self,
+        rows: &[(Source, &str, Vec<String>)],
+        fetched_at: i64,
+    ) -> Result<()> {
+        // Immediate, because a transaction that reads first cannot wait for the write lock later.
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        {
+            let mut stored = tx.prepare(
+                "SELECT source, creator FROM plays UNION SELECT source, creator FROM affinities",
+            )?;
+            let stored: HashSet<(String, String)> = stored
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<std::result::Result<_, _>>()?;
+            let mut clear = tx.prepare(&format!(
+                "DELETE FROM interests WHERE source = ?1 AND creator = ?2 AND origin = '{AI_ORIGIN}'"
+            ))?;
+            let mut keep = tx.prepare(&format!(
+                "INSERT OR REPLACE INTO interests (source, creator, interest, origin, fetched_at)
+                 VALUES (?1, ?2, ?3, '{AI_ORIGIN}', ?4)"
+            ))?;
+            let asked_only = [NO_TAGS.to_owned()];
+            for (source, creator, tags) in rows {
+                let source = source.as_str();
+                if !stored.contains(&(source.to_owned(), (*creator).to_owned())) {
+                    continue;
+                }
+                clear.execute([source, creator])?;
+                let tags = if tags.is_empty() {
+                    &asked_only
+                } else {
+                    &tags[..]
+                };
+                for tag in tags {
+                    keep.execute(params![source, creator, tag, fetched_at])?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The names the last Roast gave, by the id of a Galaxy in the Both view. A Roast that cannot be read
+    /// names nothing, because the Roast screen is the place to say so and a Universe is still worth drawing.
+    pub fn latest_galaxy_names(&self) -> Result<HashMap<u32, String>> {
+        match self.latest_roast() {
+            Ok(latest) => Ok(latest
+                .into_iter()
+                .flat_map(|stored| stored.roast.galaxy_names)
+                .map(|galaxy| (galaxy.id, galaxy.name))
+                .collect()),
+            Err(Error::UnreadableRoast) => Ok(HashMap::new()),
+            Err(e) => Err(e),
+        }
     }
 
     /// Saves a finished Roast, waiting for up to `wait` on a busy database in place of the usual 5
@@ -1023,6 +1117,156 @@ mod tests {
         assert!(note.contains("not saved"), "{note}");
         assert!(note.contains("Close any other copy"), "{note}");
         assert_eq!(store.latest_roast().unwrap(), None);
+    }
+
+    fn named_roast(names: &[(u32, &str)]) -> Roast {
+        Roast {
+            galaxy_names: names
+                .iter()
+                .map(|(id, name)| crate::roast::GalaxyName {
+                    id: *id,
+                    name: (*name).into(),
+                })
+                .collect(),
+            ..a_roast("Named")
+        }
+    }
+
+    #[test]
+    fn the_galaxy_names_are_the_last_roasts() {
+        let store = Store::open_in_memory().unwrap();
+        assert!(store.latest_galaxy_names().unwrap().is_empty());
+        store
+            .save_roast("Claude Code", &named_roast(&[(0, "Old")]), 1000, false)
+            .unwrap();
+        store
+            .save_roast("Claude Code", &named_roast(&[(1, "New")]), 2000, false)
+            .unwrap();
+        assert_eq!(
+            store.latest_galaxy_names().unwrap(),
+            HashMap::from([(1, "New".to_owned())])
+        );
+    }
+
+    /// A Universe is worth drawing whatever has become of the last Roast.
+    #[test]
+    fn a_last_roast_that_cannot_be_read_names_nothing_and_is_no_error() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO roasts (created_at, provider_label, json)
+                 VALUES (1, 'Claude Code', '{\"from\": \"another version\"}')",
+                [],
+            )
+            .unwrap();
+        assert!(store.latest_galaxy_names().unwrap().is_empty());
+    }
+
+    #[test]
+    fn asked_about_with_no_tags_is_remembered_and_is_not_an_interest() {
+        let mut store = Store::open_in_memory().unwrap();
+        let (tagged, empty) = (spotify_creator("Tagged"), spotify_creator("Asked About"));
+        store.insert_plays(&[tagged, empty]).unwrap();
+
+        store
+            .keep_ai_interests(
+                &[
+                    (Source::Spotify, "Tagged", vec!["jazz".to_owned()]),
+                    (Source::Spotify, "Asked About", Vec::new()),
+                ],
+                5,
+            )
+            .unwrap();
+
+        let asked = store.ai_asked().unwrap();
+        assert!(asked.contains(&(Source::Spotify, "Tagged".to_owned())));
+        assert!(asked.contains(&(Source::Spotify, "Asked About".to_owned())));
+        let all = store.interests().unwrap();
+        assert_eq!(all.len(), 1, "{all:?}");
+        assert_eq!(all[&(Source::Spotify, "Tagged".to_owned())], ["jazz"]);
+    }
+
+    #[test]
+    fn an_interest_from_elsewhere_does_not_count_as_asked() {
+        let store = Store::open_in_memory().unwrap();
+        let mut store = store;
+        store
+            .set_interests(Source::Spotify, "A", &["jazz".into()], "spotify_api", 1)
+            .unwrap();
+        store
+            .set_interests(Source::Spotify, "B", &["jazz".into()], "demo", 1)
+            .unwrap();
+        assert!(store.ai_asked().unwrap().is_empty());
+    }
+
+    /// The Provider takes a while, and a Creator can leave while it does.
+    #[test]
+    fn a_tag_for_a_creator_no_longer_stored_is_not_kept_and_an_affinity_counts_as_stored() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .set_affinities(
+                Source::Spotify,
+                "top_artist",
+                &[affinity(Source::Spotify, "Only Liked", "top_artist", 5.0)],
+            )
+            .unwrap();
+        store
+            .keep_ai_interests(
+                &[
+                    (Source::Spotify, "Gone", vec!["jazz".to_owned()]),
+                    (Source::Youtube, "Gone Too", Vec::new()),
+                    (Source::Spotify, "Only Liked", vec!["chess".to_owned()]),
+                ],
+                5,
+            )
+            .unwrap();
+        let all = store.interests().unwrap();
+        assert_eq!(all.len(), 1, "{all:?}");
+        assert_eq!(all[&(Source::Spotify, "Only Liked".to_owned())], ["chess"]);
+        assert_eq!(store.ai_asked().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn delete_demo_takes_ai_tags_on_demo_creators_and_leaves_the_rest() {
+        let mut store = Store::open_in_memory().unwrap();
+        let real = Play {
+            origin: Origin::Export,
+            ..play(Source::Spotify, "Real Band", "Real Song", 100_000)
+        };
+        let demo = play(Source::Spotify, "Moth Season", "Low Tide", 200_000);
+        store.insert_plays(&[real, demo]).unwrap();
+        store
+            .set_affinities(
+                Source::Youtube,
+                DEMO_KIND,
+                &[affinity(Source::Youtube, "Demo Liked", DEMO_KIND, 5.0)],
+            )
+            .unwrap();
+        store
+            .keep_ai_interests(
+                &[
+                    (Source::Spotify, "Real Band", vec!["jazz".to_owned()]),
+                    (Source::Spotify, "Moth Season", vec!["shoegaze".to_owned()]),
+                    (Source::Youtube, "Demo Liked", Vec::new()),
+                ],
+                5,
+            )
+            .unwrap();
+
+        store.delete_demo().unwrap();
+
+        let asked = store.ai_asked().unwrap();
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert!(asked.contains(&(Source::Spotify, "Real Band".to_owned())));
+        let all = store.interests().unwrap();
+        assert_eq!(all.len(), 1, "{all:?}");
+        assert_eq!(all[&(Source::Spotify, "Real Band".to_owned())], ["jazz"]);
+    }
+
+    /// What a Play by this Creator looks like when only its name matters.
+    fn spotify_creator(creator: &str) -> Play {
+        play(Source::Spotify, creator, "Song", 1000)
     }
 
     #[test]

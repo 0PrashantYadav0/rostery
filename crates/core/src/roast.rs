@@ -4,6 +4,7 @@
 use crate::digest::{is_hidden, Digest};
 use crate::error::{Error, Result};
 use crate::llm::{self, CompletionRequest, Provider};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::json;
 use std::time::Duration;
@@ -197,29 +198,32 @@ fn validated(roast: Roast) -> Option<Roast> {
     (whole && !kept.burns.is_empty()).then_some(kept)
 }
 
-/// The first JSON object in this text that is a Roast, which gets past code fences, prose around it
-/// and any stray braces in that prose.
-fn first_roast(text: &str) -> Option<Roast> {
+/// The first JSON object in this text that is a `T`, which gets past code fences, prose around it and
+/// any stray braces in that prose.
+fn first_json<T: DeserializeOwned>(text: &str) -> Option<T> {
     text.match_indices('{').find_map(|(at, _)| {
         serde_json::Deserializer::from_str(&text[at..])
-            .into_iter::<Roast>()
+            .into_iter::<T>()
             .next()?
             .ok()
     })
 }
 
-/// A reasoning model thinks first and can draft a whole Roast while it does, so what counts is what
+/// A reasoning model thinks first and can draft a whole answer while it does, so what counts is what
 /// follows its last `</think>`. Some leave out the opening tag. A reply where only the thinking holds
-/// a Roast, or a joke that quotes the tag, still has the whole text to fall back on.
-fn parse_reply(reply: &str) -> Option<Roast> {
+/// an answer, or a joke that quotes the tag, still has the whole text to fall back on.
+pub(crate) fn parse_reply<T: DeserializeOwned>(reply: &str) -> Option<T> {
     if reply.len() > MAX_REPLY_BYTES {
         return None;
     }
     let after_thinking = reply.rsplit_once("</think>").map(|(_, after)| after);
-    let roast = after_thinking
-        .and_then(first_roast)
-        .or_else(|| first_roast(reply))?;
-    validated(roast)
+    after_thinking
+        .and_then(first_json)
+        .or_else(|| first_json(reply))
+}
+
+pub(crate) fn parse_roast(reply: &str) -> Option<Roast> {
+    validated(parse_reply(reply)?)
 }
 
 /// The asking is a parameter so that a test can be the Provider. A Provider that fails gets no second
@@ -247,11 +251,11 @@ fn generate_with(
         ),
         schema: schema(),
     };
-    if let Some(roast) = parse_reply(&ask(&request)?) {
+    if let Some(roast) = parse_roast(&ask(&request)?) {
         return Ok(roast);
     }
     request.user.push_str(REMINDER);
-    parse_reply(&ask(&request)?).ok_or_else(|| Error::Provider(gave_up.to_owned()))
+    parse_roast(&ask(&request)?).ok_or_else(|| Error::Provider(gave_up.to_owned()))
 }
 
 fn replied_twice(p: &Provider) -> String {
@@ -658,7 +662,7 @@ mod tests {
         });
         // Under the limit on a whole reply, which is about memory and not layout.
         let text = reply.to_string();
-        let roast = parse_reply(&text.replace(&long, &"w".repeat(4_000))).unwrap();
+        let roast = parse_roast(&text.replace(&long, &"w".repeat(4_000))).unwrap();
         assert_eq!(roast.burns.len(), MAX_BURNS);
         for (text, cap) in [
             (&roast.headline, MAX_HEADLINE),
@@ -676,7 +680,7 @@ mod tests {
         assert_eq!(roast.galaxy_names.len(), MAX_GALAXY_NAMES);
 
         // A whole reply far past any real one is not even looked at.
-        assert!(parse_reply(&text).is_none());
+        assert!(parse_roast(&text).is_none());
     }
 
     #[test]

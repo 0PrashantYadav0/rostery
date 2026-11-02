@@ -391,27 +391,32 @@ fn propagate_labels(n: usize, links: &[Link]) -> Vec<u32> {
     labels
 }
 
-/// Sets each Planet's Galaxy. IDs follow the heaviest member, so Galaxy 0 holds the heaviest Planet.
-pub fn galaxies(
-    planets: &mut [Planet],
-    links: &[Link],
-    names: &HashMap<u32, String>,
-) -> Vec<Galaxy> {
+/// Sets each Planet's Galaxy and says how many there are. IDs follow the heaviest member, so Galaxy 0
+/// holds the heaviest Planet.
+pub fn group(planets: &mut [Planet], links: &[Link]) -> u32 {
     let labels = propagate_labels(planets.len(), links);
     let mut ids: HashMap<u32, u32> = HashMap::new();
     for (planet, label) in planets.iter_mut().zip(labels) {
         let next = ids.len() as u32;
         planet.galaxy = *ids.entry(label).or_insert(next);
     }
+    ids.len() as u32
+}
+
+/// `names` go by the id of a Galaxy in these Planets. One that no Galaxy here has does nothing.
+pub fn galaxies(planets: &[Planet], count: u32, names: &HashMap<u32, String>) -> Vec<Galaxy> {
     // A name from a Roast is taken from the start, so no default can land on it.
     let mut taken: HashSet<String> = names.values().cloned().collect();
-    (0..ids.len() as u32)
+    // Heaviest first, so when two Galaxies claim one name the heavier keeps it.
+    let mut claimed: HashSet<&str> = HashSet::new();
+    (0..count)
         .map(|id| {
             let members: Vec<&Planet> = planets.iter().filter(|p| p.galaxy == id).collect();
             Galaxy {
                 id,
                 name: names
                     .get(&id)
+                    .filter(|name| claimed.insert(name.as_str()))
                     .cloned()
                     .unwrap_or_else(|| default_name(&members, &mut taken)),
                 hue: (FIRST_HUE + id as f64 * GOLDEN_RATIO).fract(),
