@@ -4,11 +4,11 @@
 
 **Blocked by:** 07
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Up to 80 of the heaviest Creators are tagged, and tags are cached so the next run sends nothing new
-- [ ] Tags are normalised, and any Creator the Provider invents is ignored
-- [ ] If tagging fails, the Roast still runs
-- [ ] After a Roast, new Links appear and Galaxies have their Roast names
+- [x] Up to 80 of the heaviest Creators are tagged, and tags are cached so the next run sends nothing new
+- [x] Tags are normalised, and any Creator the Provider invents is ignored
+- [x] If tagging fails, the Roast still runs
+- [x] After a Roast, new Links appear and Galaxies have their Roast names
 
 Stop point 3 follows this ticket.

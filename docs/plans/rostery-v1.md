@@ -437,7 +437,7 @@ Ticket 09. Blocked by Tasks 5 and 8.
 - Modify: `package.json`, `crates/core/src/lib.rs`, `src-tauri/{Cargo.toml,src/commands.rs}`, `playwright.config.ts`, `web/shared/*`, `web/app/App.svelte`
 
 **Interfaces:**
-- Consumes: `UniverseView.svelte`, `Universe`, `Roast`, `Store`.
+- Consumes: `UniverseView.svelte`, `Universe`, `Roast`, `Store`. Each Universe comes from `universe::from_store`, not `universe::build`, because that is what gives the Spotify and YouTube views their Roast names (`docs/design.md`, Roast names in each view).
 - Produces, camelCase serde:
 
 ```rust
@@ -581,7 +581,7 @@ pub fn oauth::refresh(cfg: &OAuthConfig, refresh_token: &str) -> Result<TokenSet
 pub fn spotify_api::sync(api: &str, access_token: &str, store: &mut Store, now: i64) -> Result<SyncSummary>;
 ```
 
-`SyncSummary { plays_added: u64, affinities: u64, interests: u64 }`. Commands `connection_status() -> Connections { spotify: bool, youtube: bool }`, `connect_spotify(client_id, consent: bool)`, `sync_spotify() -> SyncSummary`, `disconnect_spotify()`. Keychain name `spotify_refresh`. Scopes `user-read-recently-played user-top-read`.
+`SyncSummary { plays_added: u64, affinities: u64, interests: u64 }`. Commands `connection_status() -> Connections { spotify: bool, youtube: bool }`, `connect_spotify(client_id, consent: bool)`, `sync_spotify() -> SyncSummary`, `disconnect_spotify()`. Keychain name `spotify_refresh`. Scopes `user-read-recently-played user-top-read`. `disconnect_spotify` also deletes `ai` rows in `interests`, including the empty ones that mean a Creator was asked about, for any Creator it leaves with no Play or Affinity, because Task 8 tags from what is stored.
 
 - [ ] **Step 1: Write failing OAuth tests**
 
@@ -613,7 +613,7 @@ Ticket 13. Blocked by Task 12.
 
 **Interfaces:**
 - Consumes: `oauth`, `Store`, `secrets`.
-- Produces: `youtube_api::sync(api: &str, access_token: &str, store: &mut Store, now: i64) -> Result<SyncSummary>`, `Store::purge_youtube_api_data(older_than: i64) -> Result<u64>`, called at app startup with `now - 30 days`. Commands `connect_youtube(client_id, client_secret)`, `sync_youtube`, `disconnect_youtube`. Keychain names `google_client_secret`, `google_refresh`. Scope `https://www.googleapis.com/auth/youtube.readonly`. `extra_auth_params`: `access_type=offline`, `prompt=consent`.
+- Produces: `youtube_api::sync(api: &str, access_token: &str, store: &mut Store, now: i64) -> Result<SyncSummary>`, `Store::purge_youtube_api_data(older_than: i64) -> Result<u64>`, called at app startup with `now - 30 days`. It and `disconnect_youtube` also delete `ai` rows in `interests` for any Creator they leave with no Play or Affinity, as in Task 12. Commands `connect_youtube(client_id, client_secret)`, `sync_youtube`, `disconnect_youtube`. Keychain names `google_client_secret`, `google_refresh`. Scope `https://www.googleapis.com/auth/youtube.readonly`. `extra_auth_params`: `access_type=offline`, `prompt=consent`.
 
 - [ ] **Step 1: Write failing tests with `mockito`**
 
@@ -645,7 +645,7 @@ Ticket 14. Blocked by Tasks 11 and 13.
 
 - [ ] **Step 2: Implement with `frontend-design`**
 
-Welcome flow: what Rostery is in two sentences, add data (Export, Connection or demo), pick a Provider with live status, then Roast me. Every screen says what stays on the machine. `PRIVACY.md` turns the "What leaves the machine" table into a privacy policy, and states how to disconnect and delete, which Spotify's policy requires. Settings gets "Delete everything".
+Welcome flow: what Rostery is in two sentences, add data (Export, Connection or demo), pick a Provider with live status, then Roast me. Every screen says what stays on the machine. `PRIVACY.md` turns the "What leaves the machine" table into a privacy policy, and states how to disconnect and delete, which Spotify's policy requires. It says plainly that the tag step sends Creator names, and that Codex also sends a person's own `~/.codex/AGENTS.md` with each call, which nothing stops (ADR 0003). Settings gets "Delete everything".
 
 A local Provider's row in Settings gets an API key field, which is the only way to use a server that wants one. `api_key` on `Provider::Local` exists and is sent when present, but Task 7 left nothing setting it, because the keychain only arrives with Task 10. The key goes in `secrets` as `ollama-api-key` or `lm-studio-api-key` and never in the settings JSON. `src-tauri/src/commands.rs` reads it and sets it on the Provider before `llm::complete` and `llm::statuses`. The status and the error that say Rostery cannot send a key yet change to say where to add one, and the `ponytail:` comment on `api_key` goes.
 
