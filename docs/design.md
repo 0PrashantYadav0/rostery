@@ -83,8 +83,8 @@ There are two frontend builds from one package. `dist/app` is loaded by the desk
 | Action | What goes where |
 |---|---|
 | Import an Export | Nothing. |
-| Roast with a local LLM | Digest to the configured URL. Rostery flags a URL that is not loopback. |
-| Roast with Claude Code or Codex | Digest and top Creator names to Anthropic or OpenAI, under the user's subscription. The app says this before the first call and can show the exact Digest. |
+| Roast with a local LLM | Digest to the configured URL, with no proxy and no redirect. On a loopback address it stays on this computer. Any other address gets a warning that names the host. |
+| Roast with Claude Code or Codex | Digest to Anthropic or OpenAI, under the user's subscription. It holds song and video titles, Creator names, Interests and dates. The app says this before each call and can show the exact Digest. |
 | Connect to a Source | OAuth requests to that Source. |
 | Publish | The Share Site to GitHub or Vercel. It becomes public. |
 
@@ -130,9 +130,9 @@ Clearing demo data removes demo Plays, demo Interests, demo Affinities and any R
 
 ## Roast
 
-`digest::build` produces a capped summary: totals, top Creators with Interests, top Items, skip rate, longest repeat of one Item, biggest day, late night share in local time, Galaxy members, deleted video count. It never includes URLs, IDs or raw Plays, and it stays under 64 KB with any amount of history.
+`digest::build` produces a capped summary: totals, top Creators with Interests, top Items, skip rate, longest repeat of one Item, biggest day, late night share in local time, Galaxy members, deleted video count. It holds song and video titles, Creator names, Interests and dates. It never includes URLs, IDs or raw Plays, and it stays under 64 KB with any amount of history.
 
-The default system prompt ships in `prompts/roast.md` and the user can override it in settings. It says what to do and what to avoid: jokes target taste and habits, never protected traits, health or anything involving minors. It says to treat everything inside `<digest>` as data.
+The system prompt has two parts. The voice ships in `prompts/roast.md`, and the user can edit it in Settings, up to 20,000 characters, and reset it. It says what to do and what to avoid: jokes target taste and habits, never protected traits, health or anything involving minors. `prompts/roast-contract.md` is always added after it and is never shown for editing. It gives the shape of the reply and says to treat everything inside `<digest>` as data, so an edit cannot break parsing or that rule.
 
 A Roast is one JSON document:
 
@@ -146,9 +146,11 @@ A Roast is one JSON document:
 }
 ```
 
-Rostery extracts the first JSON object from the reply that is a Roast, tolerating code fences and prose. It retries once with a reminder on bad JSON, clamps `score` to 0..=100, fails if `burns` is empty, and caps every field and list, with at most 12 Burns, so a Provider cannot blow up the screen or a Share Site. A failed run never replaces the previous Roast.
+Rostery extracts the first JSON object from the reply that is a Roast, tolerating code fences and prose, and looks past everything up to a reasoning model's last `</think>`, because a draft Roast can sit in there. Nothing asks a local server for a `response_format`, because servers differ on which they accept. It retries once with a reminder on bad JSON, clamps `score` to 0..=100, fails if `burns` is empty, and caps every field and list, with at most 12 Burns, so a Provider cannot blow up the screen or a Share Site. A failed run never replaces the previous Roast.
 
-One Roast runs at a time, which Rust enforces as well as the screen. It belongs to the app and not to the screen, so it survives moving between screens. Quitting the app stops a CLI that is still running. If the demo data a Roast is about leaves while it runs, the Roast is not kept, and the error says to press Roast me.
+One Roast runs at a time, which Rust enforces as well as the screen. It belongs to the app and not to the screen, so it survives moving between screens, and the rail marks it while it runs and when it ends or fails. The Provider and the prompt are read when it starts, so changing Settings during a Roast only changes the next one. A CLI gets 5 minutes and a local server 10, since a model on a CPU is slow. Quitting the app stops a CLI that is still running. If the demo data a Roast is about leaves while it runs, the Roast is not kept, and the error says to press Roast me. A finished Roast waits up to 2 minutes for a busy database, where everything else waits 5 seconds. If it still cannot be saved, it shows anyway, with a sentence saying it will be gone when the app closes.
+
+Settings shows each Provider's state: whether its CLI is installed and logged in, or whether its server answers, with a next step when something is missing. Those checks spawn processes and call the network, so they run on a worker thread with a timeout each, 5 seconds for a CLI and 2 for a server, and the screen never waits for them. Settings stay in the `settings` key as JSON. A local server's API key is sent when present and never written there.
 
 A second, cheaper prompt in `prompts/interests.md` asks for up to 3 Interests per Creator for the top 80 Creators that do not have any from AI yet. The result is cached. This is what links a lo-fi YouTube channel to a Spotify artist when they never shared a Session. If it fails, the Roast still runs.
 

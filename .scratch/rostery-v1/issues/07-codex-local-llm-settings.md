@@ -4,10 +4,10 @@
 
 **Blocked by:** 06
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Codex runs read-only and ephemeral on the user's own login
-- [ ] Any OpenAI-compatible local server works, and a URL that is not loopback gets flagged
-- [ ] Provider status is detected live, with a next step when something is missing
-- [ ] The system prompt can be edited and reset, and the edit is used by the next Roast
-- [ ] "See what gets sent" shows the exact Digest JSON
+- [x] Codex runs read-only and ephemeral on the user's own login
+- [x] Any OpenAI-compatible local server works, and a URL that is not loopback gets flagged
+- [x] Provider status is detected live, with a next step when something is missing
+- [x] The system prompt can be edited and reset, and the edit is used by the next Roast
+- [x] "See what gets sent" shows the exact Digest JSON

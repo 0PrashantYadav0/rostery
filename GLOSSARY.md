@@ -67,7 +67,7 @@ _Avoid_: Cluster, community, constellation
 ### Roast
 
 **Digest**:
-The aggregated summary of a person's history that a Provider receives. It holds counts and names, never raw Plays.
+The aggregated summary of a person's history that a Provider receives. It holds counts, song and video titles, Creator names, Interests and dates, never raw Plays.
 _Avoid_: Summary, context, payload
 
 **Provider**:
