@@ -3716,6 +3716,10 @@ test('a Digest with a hostile or very long title stays text and stays inside the
   expect(box.x).toBeGreaterThanOrEqual(0);
   expect(box.x + box.width).toBeLessThanOrEqual(640);
   expect(box.y + box.height).toBeLessThanOrEqual(480);
+  // However long the Digest, Close and its focus stay in view.
+  const close = dialog.getByRole('button', { name: 'Close' });
+  await expect(close).toBeInViewport();
+  await expect(close).toBeFocused();
 });
 
 test('system prompt reset', async ({ page }) => {
@@ -4320,10 +4324,24 @@ test('Settings has words while it reads, and a way to try again when that fails'
   await expect(page.getByText('Reading your settings.')).toHaveCount(0);
   const again = page.getByRole('button', { name: 'Try again' });
 
-  // Still failing, it stays where it was with focus on it.
+  // A slow retry says it is reading, and a second press does nothing.
+  let reads = 0;
+  let fail = () => {};
+  read = () => {
+    reads += 1;
+    return new Promise((_, reject) => (fail = () => reject(new Error(NO_DATABASE))));
+  };
   await again.click();
+  await expect(page.getByRole('status').filter({ hasText: 'Reading your settings.' })).toBeVisible();
+  await expect(again).toHaveAttribute('aria-disabled', 'true');
+  await again.click({ force: true });
+  expect(reads).toBe(1);
+  fail();
+
+  // Still failing, it stays where it was with focus on it.
   await expect(visibleAlert(page)).toHaveText(NO_DATABASE);
   await expect(again).toBeFocused();
+  await expect(again).toHaveAttribute('aria-disabled', 'false');
 
   read = () => mocks.state.saved;
   await again.click();
@@ -4501,4 +4519,18 @@ test('the Roast screen says when Creators are being tagged', async ({ page }) =>
   await expect(page.getByRole('status').filter({ hasText: 'Reading your history' })).toBeVisible();
   await emitEvent(page, 'roast-progress', 'Tagging your Creators with Interests');
   await expect(page.getByRole('status').filter({ hasText: 'Tagging your Creators with Interests' })).toBeVisible();
+});
+
+test('a tag step that failed is said calmly beside the finished Roast', async ({ page }) => {
+  const note = 'Rostery could not tag your Creators this time, so this Roast added no new Links. It will ask again on your next Roast.';
+  await installMockIpc(page, {
+    ...withHistory,
+    generate_roast: () => ({ roast: { ...aRoast, id: 7 }, notSaved: null, notTagged: note }),
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Roast', exact: true }).click();
+  await page.getByRole('button', { name: 'Roast me' }).click();
+  await expect(page.getByText(note)).toBeVisible();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: aRoast.roast.headline })).toBeVisible();
 });

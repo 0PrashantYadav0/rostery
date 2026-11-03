@@ -34,6 +34,8 @@
   let askedAt = $state('');
   /** What is saved could not be read, so there is nothing to show but a way to try again. */
   let loadFailed = $state(false);
+  /** A read under way, which a retry after a failure must show. */
+  let reading = $state(false);
   let problem = $state('');
   let checkProblem = $state('');
   let addressProblem = $state('');
@@ -258,6 +260,7 @@
   }
 
   async function load() {
+    reading = true;
     try {
       // What a save from the last time here leaves is what there is to read.
       await queue;
@@ -277,14 +280,19 @@
     } catch (e) {
       problem = errorMessage(e);
       loadFailed = true;
+      reading = false;
       return;
     }
+    reading = false;
     // Neither waited for, because the screen is ready and the first can take seconds.
     check();
     run.loadDisclosure().catch((e) => (problem = errorMessage(e)));
   }
 
   async function retry() {
+    if (reading) return;
+    // Cleared so the same message, if it comes back, is announced again.
+    problem = '';
     await load();
     await tick();
     // Its button is gone when that worked, and focus would otherwise fall to the page.
@@ -318,9 +326,10 @@
 
   {#if chosen === undefined}
     <!-- Mounted before its words change, or a screen reader would not announce them. -->
-    <p class="reading" role="status">{loadFailed ? '' : 'Reading your settings.'}</p>
+    <p class="reading" role="status">{reading ? 'Reading your settings.' : ''}</p>
     {#if loadFailed}
-      <button class="retry" tabindex="0" bind:this={retryButton} onclick={retry}>Try again</button>
+      <!-- aria-disabled, because a disabled button drops keyboard focus to the page. retry() checks too. -->
+      <button class="retry" tabindex="0" aria-disabled={reading} bind:this={retryButton} onclick={retry}>Try again</button>
     {/if}
   {:else}
     <section aria-labelledby="provider-name">
@@ -428,6 +437,8 @@
   {/if}
 
   <dialog bind:this={dialog} aria-labelledby="digest-name">
+    <!-- Everything but Close scrolls, so Close and its focus stay in view in the smallest window. -->
+    <div class="dialog-body">
     <h2 id="digest-name">What gets sent</h2>
     <p>
       This is the exact Digest your Provider would get right now, along with the system prompt. Rostery has already taken out most web
@@ -464,6 +475,7 @@
         <p>No Creators are waiting to be tagged, so no names go ahead of the Digest.</p>
       {/if}
     {/if}
+    </div>
     <button tabindex="0" onclick={() => dialog?.close()}>Close</button>
   </dialog>
 </div>
@@ -739,6 +751,15 @@
     display: flex;
     flex-direction: column;
     gap: 12px;
+  }
+
+  .dialog-body {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: 12px;
+    min-height: 0;
+    overflow: auto;
   }
 
   dialog::backdrop {
