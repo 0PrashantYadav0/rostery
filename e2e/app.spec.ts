@@ -4534,3 +4534,90 @@ test('a tag step that failed is said calmly beside the finished Roast', async ({
   await expect(page.getByRole('alert')).toHaveCount(0);
   await expect(page.getByRole('heading', { name: aRoast.roast.headline })).toBeVisible();
 });
+
+const openShare = async (page: Page) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Share', exact: true }).click();
+};
+
+test('the Roast is included by default, with the warning beside it', async ({ page }) => {
+  const sent: unknown[] = [];
+  await installMockIpc(page, {
+    ...withHistory,
+    latest_roast: () => aRoast,
+    export_site: ({ opts }: { opts: unknown }) => (sent.push(opts), { dir: '/data/site', bytes: 210_000 }),
+  });
+  await openShare(page);
+  const roast = page.getByRole('checkbox', { name: /Your Roast/ });
+  await expect(roast).toBeChecked();
+  await expect(page.getByText('Your Roast quotes song and video titles and names from all your history')).toBeVisible();
+  await expect(page.getByRole('checkbox', { name: /Song and video titles/ })).not.toBeChecked();
+  await expect(page.getByText(`Your Roast, "${aRoast.roast.headline}", and its Verdict`)).toBeVisible();
+
+  await page.getByRole('button', { name: 'Export' }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'Saved 210 KB to /data/site.' })).toBeVisible();
+  expect(sent).toEqual([
+    { displayName: 'Anonymous', includeRoast: true, includeSpotify: true, includeYoutube: true, includeItemTitles: false },
+  ]);
+
+  await roast.uncheck();
+  await expect(page.getByText(`Your Roast, "${aRoast.roast.headline}"`)).toHaveCount(0);
+  await page.getByLabel('Your name on the page').fill('Sam');
+  await page.getByRole('button', { name: 'Export' }).click();
+  await expect.poll(() => sent.length).toBe(2);
+  expect(sent[1]).toMatchObject({ displayName: 'Sam', includeRoast: false });
+});
+
+test('preview and reveal appear after an export, and a failure says why', async ({ page }) => {
+  const calls: string[] = [];
+  await installMockIpc(page, {
+    ...withHistory,
+    latest_roast: () => aRoast,
+    export_site: () => ({ dir: '/data/site', bytes: 2_400_000 }),
+    open_site_preview: () => {
+      calls.push('preview');
+    },
+    reveal_site: () => {
+      throw new Error('Rostery could not open it. Check that you have a default browser set, then try again.');
+    },
+  });
+  await openShare(page);
+  await expect(page.getByRole('button', { name: 'Preview in browser' })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Export' }).click();
+  await expect(page.getByText('Saved 2.4 MB to /data/site.')).toBeVisible();
+  await page.getByRole('button', { name: 'Preview in browser' }).click();
+  await expect.poll(() => calls).toEqual(['preview']);
+  await page.getByRole('button', { name: 'Reveal folder' }).click();
+  await expect(page.getByRole('alert')).toHaveText('Rostery could not open it. Check that you have a default browser set, then try again.');
+});
+
+test('with no Roast and nothing chosen there is nothing to export', async ({ page }) => {
+  let exports = 0;
+  await installMockIpc(page, { ...withHistory, export_site: () => (exports++, { dir: '/d', bytes: 1 }) });
+  await openShare(page);
+  await expect(page.getByRole('checkbox', { name: /Your Roast/ })).toBeDisabled();
+  await expect(page.getByText('You have no Roast yet.')).toBeVisible();
+  await expect(page.getByRole('checkbox', { name: /YouTube Universe/ })).toBeDisabled();
+  await page.getByRole('checkbox', { name: /Spotify Universe/ }).uncheck();
+  await expect(page.getByText('Nothing yet. Choose your Roast or a Universe.')).toBeVisible();
+  await page.getByRole('button', { name: 'Export' }).click({ force: true });
+  expect(exports).toBe(0);
+});
+
+test('Tab reaches the Share choices and Export in WebKit too', async ({ page }) => {
+  await installMockIpc(page, { ...withHistory, latest_roast: () => aRoast });
+  await openShare(page);
+  await page.getByLabel('Your name on the page').focus();
+  const reached: string[] = [];
+  for (let i = 0; i < 8; i++) {
+    await page.keyboard.press('Tab');
+    reached.push(
+      await page.evaluate(() => {
+        const el = document.activeElement as HTMLInputElement;
+        return el.tagName === 'INPUT' ? el.type : el.textContent!.trim();
+      }),
+    );
+  }
+  expect(reached).toContain('checkbox');
+  expect(reached).toContain('Export');
+});

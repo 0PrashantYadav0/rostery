@@ -443,7 +443,7 @@ Ticket 09. Blocked by Tasks 5 and 8.
 ```rust
 pub struct ExportOptions { pub display_name: String, pub include_roast: bool,
                            pub include_spotify: bool, pub include_youtube: bool,
-                           pub include_item_titles: bool }   // Default: "Anonymous", false, true, true, false
+                           pub include_item_titles: bool }   // Default: "Anonymous", true, true, true, false
 pub struct SharePayload { pub display_name: String, pub generated_at: i64, pub roast: Option<Roast>,
                           pub universes: BTreeMap<UniverseFilter, Universe>, pub attribution: Vec<String> }
 pub struct SiteFile { pub path: String, pub bytes: Vec<u8> }
@@ -463,7 +463,7 @@ Commands `export_site(opts) -> ExportResult { dir: String, bytes: u64 }`, `open_
 - `line_separators_escaped`: U+2028 and U+2029 are escaped.
 - `excluded_source_is_absent`: `include_youtube: false` means a sentinel channel name appears in no file, with a stored Roast that quotes it and the default options.
 - `excluded_roast_is_absent`.
-- `roast_is_off_by_default`: `ExportOptions::default()` gives a payload with no Roast, though one is stored.
+- `roast_is_on_by_default`: `ExportOptions::default()` gives a payload with the stored Roast, without its Galaxy names, which travel on the Universes.
 - `item_titles_off_by_default`: a sentinel Item title appears in no file, with a stored Roast that quotes it and the default options, and appears when the option is on.
 - `included_roast_keeps_its_words`: `include_roast: true` with `include_youtube: false` and `include_item_titles: false` keeps a stored Roast's quoted title and channel. This is why the Share screen has to warn, so a change here has to change that warning too.
 - `no_secrets_in_site`: a sentinel in the settings table appears in no file.
@@ -486,7 +486,7 @@ A single scrolling page: Roast headline, opening, Burns, Verdict as a shareable 
 
 Options, a live list of exactly what will be included, Export, Preview in browser, and Reveal folder. Deploy buttons come next.
 
-The Roast option starts unticked. Beside it, always: "Your Roast quotes song and video titles and names from all your history, and the other choices here do not change its words. Read it before you include it." e2e: `including the roast is an explicit choice` (an export with nothing touched has no Roast, and the warning is on screen before the box can be ticked).
+The Roast option starts ticked. Beside it, always: "Your Roast quotes song and video titles and names from all your history, and the other choices here do not change its words. Read it before you share it." e2e: `the Roast is included by default, with the warning beside it`.
 
 - [ ] **Step 6: Run all checks and commit**
 

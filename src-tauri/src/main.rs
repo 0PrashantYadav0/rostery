@@ -47,7 +47,10 @@ fn main() {
             commands::provider_disclosure,
             commands::get_settings,
             commands::save_settings,
-            commands::default_system_prompt
+            commands::default_system_prompt,
+            commands::export_site,
+            commands::open_site_preview,
+            commands::reveal_site
         ])
         .build(tauri::generate_context!())
         .expect("Rostery could not start")

@@ -1,5 +1,6 @@
 use rostery_core::{
     demo, digest,
+    export::{self, ExportOptions, ExportResult, SiteFile},
     ingest::ImportSummary,
     interests::{self, CreatorToTag},
     llm::{self, Disclosure, Provider, ProviderStatus, Settings},
@@ -13,6 +14,7 @@ use std::path::PathBuf;
 use std::sync::{mpsc, Mutex, TryLockError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, State};
+use tauri_plugin_opener::OpenerExt;
 
 pub struct AppState {
     pub db_path: PathBuf,
@@ -222,6 +224,82 @@ pub fn default_system_prompt() -> &'static str {
 }
 
 // Debug only, because a release build ignores the override and would call the real CLI.
+/// The Share Site as `pnpm build` made it. `pnpm build` runs before any cargo build, CI's too.
+const SHARE_TEMPLATE: [(&str, &[u8]); 3] = [
+    ("index.html", include_bytes!("../../dist/share/index.html")),
+    (
+        "assets/share.js",
+        include_bytes!("../../dist/share/assets/share.js"),
+    ),
+    (
+        "assets/share.css",
+        include_bytes!("../../dist/share/assets/share.css"),
+    ),
+];
+
+/// Beside the database, in Rostery's own folder, because an export replaces everything in it.
+fn site_dir(state: &AppState) -> PathBuf {
+    state.db_path.with_file_name("site")
+}
+
+fn export_to(state: &AppState, opts: &ExportOptions) -> Result<ExportResult, Error> {
+    let store = Store::open(&state.db_path)?;
+    let payload = export::build_payload(&store, opts, now())?;
+    let template: Vec<SiteFile> = SHARE_TEMPLATE
+        .iter()
+        .map(|(path, bytes)| SiteFile {
+            path: (*path).to_owned(),
+            bytes: bytes.to_vec(),
+        })
+        .collect();
+    let files = export::render_site(&template, &payload)?;
+    let dir = site_dir(state);
+    export::write_site(&files, &dir)?;
+    Ok(ExportResult {
+        dir: dir.display().to_string(),
+        bytes: files.iter().map(|f| f.bytes.len() as u64).sum(),
+    })
+}
+
+#[tauri::command(async)]
+pub fn export_site(state: State<'_, AppState>, opts: ExportOptions) -> Result<ExportResult, Error> {
+    export_to(&state, &opts)
+}
+
+fn exported_index(state: &AppState) -> Result<PathBuf, Error> {
+    let index = site_dir(state).join("index.html");
+    if index.exists() {
+        Ok(index)
+    } else {
+        Err(Error::Export(
+            "There is no Share Site yet. Press Export, then try again.".into(),
+        ))
+    }
+}
+
+fn not_opened(e: impl std::fmt::Display) -> Error {
+    // The opener's own words are about scopes and system calls, so they go to the log.
+    eprintln!("Rostery could not open the Share Site: {e}");
+    Error::Export(
+        "Rostery could not open it. Check that you have a default browser set, then try again."
+            .into(),
+    )
+}
+
+#[tauri::command]
+pub fn open_site_preview(app: AppHandle, state: State<'_, AppState>) -> Result<(), Error> {
+    let index = exported_index(&state)?;
+    app.opener()
+        .open_path(index.to_string_lossy(), None::<&str>)
+        .map_err(not_opened)
+}
+
+#[tauri::command]
+pub fn reveal_site(app: AppHandle, state: State<'_, AppState>) -> Result<(), Error> {
+    let index = exported_index(&state)?;
+    app.opener().reveal_item_in_dir(index).map_err(not_opened)
+}
+
 #[cfg(all(test, debug_assertions))]
 mod tests {
     use super::*;
@@ -776,5 +854,30 @@ mod tests {
         assert!(run.is_err());
 
         run_roast(&rig.state, silent).unwrap();
+    }
+
+    #[test]
+    fn export_writes_the_site_beside_the_database_and_replaces_the_last_one() {
+        let rig = Rig::with_history(CAT_REPLY, REPLY);
+        let dir = rig.dir.path().join("site");
+        std::fs::create_dir_all(dir.join("old")).unwrap();
+        std::fs::write(dir.join("old/stale.html"), "left out since").unwrap();
+
+        let result = export_to(&rig.state, &ExportOptions::default()).unwrap();
+
+        assert_eq!(result.dir, dir.display().to_string());
+        assert!(result.bytes > 0);
+        let html = std::fs::read_to_string(dir.join("index.html")).unwrap();
+        assert!(html.contains("rostery-data") && !html.contains("__ROSTERY_DATA__"));
+        assert!(dir.join("assets/share.js").exists());
+        assert!(!dir.join("old").exists());
+        assert!(exported_index(&rig.state).is_ok());
+    }
+
+    #[test]
+    fn preview_before_any_export_says_what_to_do() {
+        let rig = Rig::with_history(CAT_REPLY, REPLY);
+        let message = exported_index(&rig.state).unwrap_err().to_string();
+        assert!(message.contains("Press Export"), "{message}");
     }
 }

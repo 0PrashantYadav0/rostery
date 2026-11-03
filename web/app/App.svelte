@@ -3,6 +3,7 @@
   import { roastRun as run } from './roast-run.svelte';
   import Roast from './screens/Roast.svelte';
   import Settings, { unsaved } from './screens/Settings.svelte';
+  import Share from './screens/Share.svelte';
   import Sources from './screens/Sources.svelte';
   import Universe from './screens/Universe.svelte';
 
@@ -11,7 +12,7 @@
     { label: 'Sources', ready: true },
     { label: 'Universe', ready: true },
     { label: 'Roast', ready: true },
-    { label: 'Share', ready: false },
+    { label: 'Share', ready: true },
     { label: 'Settings', ready: true },
   ];
 
@@ -94,6 +95,8 @@
       <Universe {importing} {missedError} {stored} />
     {:else if screen === 'Roast'}
       <Roast {importing} {missedError} {stored} onsources={goToSources} />
+    {:else if screen === 'Share'}
+      <Share {importing} {missedError} {stored} />
     {:else if screen === 'Settings'}
       <Settings {missedError} />
     {/if}

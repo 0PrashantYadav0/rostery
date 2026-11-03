@@ -4,7 +4,7 @@ import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebview, type DragDropEvent } from '@tauri-apps/api/webview';
 import { open } from '@tauri-apps/plugin-dialog';
 import { openUrl } from '@tauri-apps/plugin-opener';
-import type { CreatorToTag, Disclosure, FinishedRoast, ImportSummary, ProviderStatus, Settings, StoredRoast, Totals, Universe, UniverseFilter } from './types';
+import type { CreatorToTag, Disclosure, ExportOptions, ExportResult, FinishedRoast, ImportSummary, ProviderStatus, Settings, StoredRoast, Totals, Universe, UniverseFilter } from './types';
 
 export const totals = () => invoke<Totals>('totals');
 export const loadDemo = () => invoke<Totals>('load_demo');
@@ -23,6 +23,10 @@ export const providerDisclosure = () => invoke<Disclosure>('provider_disclosure'
 export const getSettings = () => invoke<Settings>('get_settings');
 export const saveSettings = (settings: Settings) => invoke<Settings>('save_settings', { settings });
 export const defaultSystemPrompt = () => invoke<string>('default_system_prompt');
+/** Writes the Share Site to Rostery's own folder, replacing the last one. */
+export const exportSite = (opts: ExportOptions) => invoke<ExportResult>('export_site', { opts });
+export const openSitePreview = () => invoke<void>('open_site_preview');
+export const revealSite = () => invoke<void>('reveal_site');
 
 /** A short phrase each time a running Roast has something new to say. */
 export const onRoastProgress = (handler: (phrase: string) => void) =>
