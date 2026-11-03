@@ -25,6 +25,12 @@ pub enum Error {
     /// A Share Site that could not be built or written. The message already says what to do next.
     #[error("{0}")]
     Export(String),
+    /// Publishing went wrong. The message already says what to do next.
+    #[error("{0}")]
+    Deploy(String),
+    /// The system keychain could not be used. The message already says what to do next.
+    #[error("{0}")]
+    Secrets(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

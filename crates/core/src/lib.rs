@@ -2,6 +2,7 @@
 //! No UI, keychain or async runtime lives here.
 
 pub mod demo;
+pub mod deploy;
 pub mod digest;
 pub mod error;
 pub mod export;
