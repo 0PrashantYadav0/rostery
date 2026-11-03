@@ -321,13 +321,16 @@ pub fn links(plays: &[Play], planets: &[Planet], filter: UniverseFilter) -> Vec<
                 .filter(|tag| tags_b.binary_search(tag).is_ok())
                 .cloned()
                 .collect();
-            let union = tags_a.len() + tags_b.len() - shared.len();
-            let jaccard = if union == 0 {
+            // Shared over the larger set. Jaccard needed 2 of 3 tags in common, so a lo-fi channel and a
+            // lo-fi artist with 3 tags each never linked. Over the smaller set, a Creator with 1 tag
+            // would link at full strength to everything that shares it.
+            let larger = tags_a.len().max(tags_b.len());
+            let overlap = if larger == 0 {
                 0.0
             } else {
-                shared.len() as f64 / union as f64
+                shared.len() as f64 / larger as f64
             };
-            let strength = SESSION_SHARE * npmi + INTEREST_SHARE * jaccard;
+            let strength = SESSION_SHARE * npmi + INTEREST_SHARE * overlap;
             if strength >= MIN_STRENGTH {
                 candidates.push(Link {
                     a: a as u32,
@@ -550,7 +553,7 @@ mod tests {
 
     #[test]
     fn link_strength_follows_the_formula() {
-        // S = 5, c_a = 3, c_b = 4, c_ab = 2, and they share 1 of 3 Interests.
+        // S = 5, c_a = 3, c_b = 4, c_ab = 2, and they share 1 Interest of 2 each.
         let plays = sessions(&[&["A", "B"], &["A", "B"], &["A"], &["B"], &["B"]]);
         let map = interests(&[
             (Source::Spotify, "A", &["jazz", "lounge"]),
@@ -560,7 +563,7 @@ mod tests {
         let link = linked(&u, "A", "B").unwrap();
         let npmi = (2.0_f64 * 5.0 / (3.0 * 4.0)).ln() / -(2.0_f64 / 5.0).ln();
         assert!(npmi < 0.0, "this pair meets less often than chance");
-        assert!(close(link.strength, 0.4 / 3.0), "npmi is floored at 0");
+        assert!(close(link.strength, 0.4 / 2.0), "npmi is floored at 0");
         assert_eq!(link.shared, ["jazz"]);
 
         // S = 6 and c_a = c_b = 3, so npmi is above 0 and counts.
@@ -639,9 +642,11 @@ mod tests {
             let map = interests(&[(Source::Spotify, "A", a), (Source::Spotify, "B", b)]);
             linked(&with_interests(&plays, &map, Spotify), "A", "B")
         };
-        // 1 of 3 gives 0.133, and 1 of 5 gives 0.08.
-        assert!(strength(&["x", "a"], &["x", "b"]).is_some());
-        assert!(strength(&["x", "a", "c"], &["x", "b", "d"]).is_none());
+        // 1 shared of 3 each gives 0.133, and 1 of 4 each gives 0.1.
+        assert!(strength(&["x", "a", "c"], &["x", "b", "d"]).is_some());
+        assert!(strength(&["x", "a", "c", "e"], &["x", "b", "d", "f"]).is_none());
+        // A Creator with 1 tag gets no Link to one with 4 just for sharing it.
+        assert!(strength(&["x"], &["x", "b", "d", "f"]).is_none());
     }
 
     #[test]

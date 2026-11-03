@@ -8,6 +8,7 @@ pub(crate) use graph::play_ms;
 
 use crate::error::Result;
 use crate::model::{Affinity, InterestMap, Play, Source};
+use crate::roast::GalaxyName;
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -111,17 +112,35 @@ fn finished(
     }
 }
 
-/// The Universe a screen or a Share Site shows, where `input.galaxy_names` are a Roast's, by the ids of
-/// Galaxies in the Both view. Those are what a Digest holds, and each view works out Galaxies of its
-/// own, so in a Source's view those ids mean something else. There each Galaxy goes by its members.
-pub fn named(input: &UniverseInput, filter: UniverseFilter) -> Universe {
+/// The Universe a screen or a Share Site shows, with a Roast's Galaxy `names`. Each goes to the Both
+/// Galaxy holding its anchor, because ids shift when an import regroups the Universe. Each view works
+/// out Galaxies of its own, so in a Source's view each Galaxy goes by its members. `input.galaxy_names`
+/// is not used here.
+pub fn named(input: &UniverseInput, names: &[GalaxyName], filter: UniverseFilter) -> Universe {
+    let (both, both_links, both_count) = grouped(input, UniverseFilter::Both);
+    let by_id = anchored(&both, names);
     if filter == UniverseFilter::Both {
-        return build(input, filter);
+        return finished(filter, both, both_links, both_count, &by_id);
     }
-    let (both, _, _) = grouped(input, UniverseFilter::Both);
     let (planets, links, count) = grouped(input, filter);
-    let names = names_from_both(&planets, count, &both, input.galaxy_names);
+    let names = names_from_both(&planets, count, &both, &by_id);
     finished(filter, planets, links, count, &names)
+}
+
+/// A name with no anchor, or whose anchor has gone, names nothing. Two that land in one Galaxy leave it
+/// the first, in the Roast's order.
+fn anchored(both: &[Planet], names: &[GalaxyName]) -> HashMap<u32, String> {
+    let mut by_id = HashMap::new();
+    for name in names {
+        let Some(anchor) = &name.anchor else { continue };
+        if let Some(p) = both
+            .iter()
+            .find(|p| p.source == anchor.source && p.name == anchor.creator)
+        {
+            by_id.entry(p.galaxy).or_insert_with(|| name.name.clone());
+        }
+    }
+    by_id
 }
 
 /// Each Galaxy of a Source's view takes the name of the Both Galaxy holding its heaviest member that is
@@ -151,14 +170,14 @@ fn names_from_both(
 /// `named`, from what is stored and the last Roast's Galaxy names. Everything that shows a Universe to
 /// a person comes through here, so they all agree.
 pub fn from_store(store: &Store, filter: UniverseFilter) -> Result<Universe> {
-    let names = store.latest_galaxy_names()?;
     Ok(named(
         &UniverseInput {
             plays: &store.plays(None)?,
             affinities: &store.affinities()?,
             interests: &store.interests()?,
-            galaxy_names: &names,
+            galaxy_names: &HashMap::new(),
         },
+        &store.latest_galaxy_names()?,
         filter,
     ))
 }
@@ -273,14 +292,32 @@ mod tests {
         rows.iter().map(|(id, n)| (*id, n.to_string())).collect()
     }
 
+    /// Names by the ids of Galaxies in Both, anchored the way a Roast's are when it is written.
+    fn anchored_rows(plays: &[Play], rows: &[(u32, &str)]) -> Vec<GalaxyName> {
+        let both = from_plays(plays, UniverseFilter::Both);
+        rows.iter()
+            .map(|(id, n)| GalaxyName {
+                id: *id,
+                name: n.to_string(),
+                anchor: both.planets.iter().find(|p| p.galaxy == *id).map(|p| {
+                    crate::roast::Anchor {
+                        source: p.source,
+                        creator: p.name.clone(),
+                    }
+                }),
+            })
+            .collect()
+    }
+
     fn named_view(plays: &[Play], rows: &[(u32, &str)], filter: UniverseFilter) -> Universe {
         named(
             &UniverseInput {
                 plays,
                 affinities: &[],
                 interests: &InterestMap::new(),
-                galaxy_names: &names(rows),
+                galaxy_names: &HashMap::new(),
             },
+            &anchored_rows(plays, rows),
             filter,
         )
     }
@@ -384,7 +421,8 @@ mod tests {
         assert!(names_from_both(&view, 1, &[], &names(&[(0, "Other")])).is_empty());
     }
 
-    fn roast_naming(rows: &[(u32, &str)]) -> crate::roast::Roast {
+    /// As a Roast is when it is saved: its names anchored in the Universe of these Plays.
+    fn roast_naming(plays: &[Play], rows: &[(u32, &str)]) -> crate::roast::Roast {
         let names: Vec<_> = rows
             .iter()
             .map(|(id, n)| json!({"id": id, "name": n}))
@@ -396,7 +434,15 @@ mod tests {
             "verdict": {"archetype": "A", "score": 1, "sentence": "S"},
             "galaxy_names": names,
         });
-        crate::roast::parse_roast(&reply.to_string()).unwrap()
+        let mut roast = crate::roast::parse_roast(&reply.to_string()).unwrap();
+        let anchors = anchored_rows(plays, rows);
+        for name in &mut roast.galaxy_names {
+            name.anchor = anchors
+                .iter()
+                .find(|a| a.id == name.id)
+                .and_then(|a| a.anchor.clone());
+        }
+        roast
     }
 
     fn store_of(plays: &[Play]) -> Store {
@@ -414,7 +460,10 @@ mod tests {
         store
             .save_roast(
                 "Claude Code",
-                &roast_naming(&[(0, "The Screen Hours"), (1, "The Headphone Hours")]),
+                &roast_naming(
+                    &artists_and_channels(),
+                    &[(0, "The Screen Hours"), (1, "The Headphone Hours")],
+                ),
                 1000,
                 false,
             )
@@ -432,7 +481,7 @@ mod tests {
         store
             .save_roast(
                 "Claude Code",
-                &roast_naming(&[(99, "Long Gone")]),
+                &roast_naming(&artists_and_channels(), &[(99, "Long Gone")]),
                 1000,
                 false,
             )
@@ -450,13 +499,80 @@ mod tests {
         }
     }
 
+    /// Ids follow the heaviest member, so an import that brings a heavier Galaxy shifts them all.
+    #[test]
+    fn a_name_stays_with_its_galaxy_after_an_import() {
+        let pairs = |a: &str, b: &str, day: i64| {
+            vec![
+                spotify(a, day * DAY, 30),
+                spotify(b, day * DAY + 60, 30),
+                spotify(a, (day + 1) * DAY, 30),
+                spotify(b, (day + 1) * DAY + 60, 30),
+            ]
+        };
+        let mut plays = pairs("Jazz Band", "Jazz Trio", 0);
+        plays.extend(pairs("Metal Band", "Metal Duo", 2));
+        let mut store = store_of(&plays);
+        let before = from_store(&store, UniverseFilter::Both).unwrap();
+        let (jazz, metal) = (
+            planet(&before, "Jazz Band").galaxy,
+            planet(&before, "Metal Band").galaxy,
+        );
+        store
+            .save_roast(
+                "Claude Code",
+                &roast_naming(
+                    &plays,
+                    &[(jazz, "Late Night Jazz Cult"), (metal, "Metal Dungeon")],
+                ),
+                1000,
+                false,
+            )
+            .unwrap();
+
+        // Far heavier than either, and alone, so it takes Galaxy 0.
+        let watches: Vec<Play> = (0..60)
+            .map(|i| youtube("Cooking Channel", (10 + i) * DAY))
+            .collect();
+        store.insert_plays(&watches).unwrap();
+
+        let after = from_store(&store, UniverseFilter::Both).unwrap();
+        assert_ne!(
+            planet(&after, "Jazz Band").galaxy,
+            jazz,
+            "the ids did shift"
+        );
+        assert_eq!(galaxy_of(&after, "Jazz Band"), "Late Night Jazz Cult");
+        assert_eq!(galaxy_of(&after, "Metal Duo"), "Metal Dungeon");
+        assert_eq!(galaxy_of(&after, "Cooking Channel"), "Cooking Channel");
+    }
+
+    #[test]
+    fn a_name_whose_anchor_has_gone_names_nothing() {
+        let plays = artists_and_channels();
+        let store = store_of(&plays[..4]);
+        store
+            .save_roast(
+                "Claude Code",
+                &roast_naming(&plays, &[(0, "The Screen Hours")]),
+                1000,
+                false,
+            )
+            .unwrap();
+        let both = from_store(&store, UniverseFilter::Both).unwrap();
+        assert!(both.galaxies.iter().all(|g| g.name != "The Screen Hours"));
+    }
+
     #[test]
     fn a_blank_galaxy_name_keeps_the_default() {
         let store = store_of(&artists_and_channels());
         store
             .save_roast(
                 "Claude Code",
-                &roast_naming(&[(0, " \u{200b}\u{0} "), (1, "Kept")]),
+                &roast_naming(
+                    &artists_and_channels(),
+                    &[(0, " \u{200b}\u{0} "), (1, "Kept")],
+                ),
                 1000,
                 false,
             )

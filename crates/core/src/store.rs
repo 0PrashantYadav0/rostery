@@ -1,9 +1,9 @@
 use crate::error::{Error, Result};
 use crate::model::{Affinity, InterestMap, Origin, Play, Source, SourceTotals, Totals};
-use crate::roast::{FinishedRoast, Roast, StoredRoast};
+use crate::roast::{FinishedRoast, GalaxyName, Roast, StoredRoast};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{de::DeserializeOwned, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
 
@@ -62,6 +62,8 @@ const AI_ORIGIN: &str = "ai";
 /// it is not asked again. In this table so that whatever clears a Creator's tags clears this too, and
 /// `Store::interests` is the one thing that reads the table and leaves it out.
 const NO_TAGS: &str = "";
+/// As long as a Roast's save waits, for the same reason: the reply behind it took minutes.
+const REPLY_WAIT: Duration = Duration::from_secs(120);
 
 pub struct Store {
     conn: Connection,
@@ -437,6 +439,8 @@ impl Store {
         rows: &[(Source, &str, Vec<String>)],
         fetched_at: i64,
     ) -> Result<()> {
+        // A reply took minutes to write, so it waits out an import rather than being thrown away.
+        self.conn.busy_timeout(REPLY_WAIT)?;
         // Immediate, because a transaction that reads first cannot wait for the write lock later.
         let tx = self
             .conn
@@ -476,16 +480,15 @@ impl Store {
         Ok(())
     }
 
-    /// The names the last Roast gave, by the id of a Galaxy in the Both view. A Roast that cannot be read
-    /// names nothing, because the Roast screen is the place to say so and a Universe is still worth drawing.
-    pub fn latest_galaxy_names(&self) -> Result<HashMap<u32, String>> {
+    /// The names the last Roast gave, each with its anchor. A Roast that cannot be read names nothing,
+    /// because the Roast screen is the place to say so and a Universe is still worth drawing.
+    pub fn latest_galaxy_names(&self) -> Result<Vec<GalaxyName>> {
         match self.latest_roast() {
             Ok(latest) => Ok(latest
                 .into_iter()
                 .flat_map(|stored| stored.roast.galaxy_names)
-                .map(|galaxy| (galaxy.id, galaxy.name))
                 .collect()),
-            Err(Error::UnreadableRoast) => Ok(HashMap::new()),
+            Err(Error::UnreadableRoast) => Ok(Vec::new()),
             Err(e) => Err(e),
         }
     }
@@ -509,6 +512,7 @@ impl Store {
             Ok(saved) => FinishedRoast {
                 roast: saved,
                 not_saved: None,
+                not_tagged: None,
             },
             Err(e) => FinishedRoast {
                 roast: StoredRoast {
@@ -520,6 +524,7 @@ impl Store {
                 not_saved: Some(format!(
                     "This Roast was not saved, so it will be gone when you close Rostery. {e}"
                 )),
+                not_tagged: None,
             },
         }
     }
@@ -1123,9 +1128,10 @@ mod tests {
         Roast {
             galaxy_names: names
                 .iter()
-                .map(|(id, name)| crate::roast::GalaxyName {
+                .map(|(id, name)| GalaxyName {
                     id: *id,
                     name: (*name).into(),
+                    anchor: None,
                 })
                 .collect(),
             ..a_roast("Named")
@@ -1144,7 +1150,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             store.latest_galaxy_names().unwrap(),
-            HashMap::from([(1, "New".to_owned())])
+            named_roast(&[(1, "New")]).galaxy_names
         );
     }
 

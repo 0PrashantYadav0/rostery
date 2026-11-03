@@ -4,6 +4,7 @@
 use crate::digest::{is_hidden, Digest};
 use crate::error::{Error, Result};
 use crate::llm::{self, CompletionRequest, Provider};
+use crate::model::Source;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::json;
@@ -48,6 +49,18 @@ pub struct Verdict {
 pub struct GalaxyName {
     pub id: u32,
     pub name: String,
+    /// The Galaxy's heaviest member when the Roast was written, set by Rostery and never by a
+    /// Provider. Ids shift when an import regroups the Universe, and the name follows this member.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<Anchor>,
+}
+
+/// A Creator, as the Universe knows it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Anchor {
+    pub source: Source,
+    pub creator: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -78,6 +91,9 @@ pub struct StoredRoast {
 pub struct FinishedRoast {
     pub roast: StoredRoast,
     pub not_saved: Option<String>,
+    /// A sentence when the tag step failed, which costs new Links and not the Roast.
+    #[serde(default)]
+    pub not_tagged: Option<String>,
 }
 
 fn clamped_score<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<u8, D::Error> {
@@ -179,9 +195,11 @@ fn validated(roast: Roast) -> Option<Roast> {
         galaxy_names: roast
             .galaxy_names
             .iter()
+            // Rostery sets the anchor after this, from the Digest, so whatever a Provider wrote goes.
             .map(|g| GalaxyName {
                 id: g.id,
                 name: clean(&g.name, MAX_GALAXY_NAME),
+                anchor: None,
             })
             .filter(|g| !g.name.is_empty())
             .take(MAX_GALAXY_NAMES)
@@ -281,6 +299,17 @@ pub fn generate(p: &Provider, digest: &Digest, voice: &str, timeout: Duration) -
         digest,
         voice,
     )
+    .map(|roast| anchored(roast, digest))
+}
+
+/// Each name gets the heaviest member of its Galaxy in the Digest it was written from, and a name for a
+/// Galaxy the Digest did not hold goes. Whatever anchor a Provider wrote is replaced.
+fn anchored(mut roast: Roast, digest: &Digest) -> Roast {
+    roast.galaxy_names.retain_mut(|galaxy| {
+        galaxy.anchor = digest.anchors.get(&galaxy.id).cloned();
+        galaxy.anchor.is_some()
+    });
+    roast
 }
 
 #[cfg(test)]
@@ -312,6 +341,7 @@ mod tests {
             }),
             youtube: None,
             galaxies: Vec::new(),
+            anchors: Default::default(),
         }
     }
 

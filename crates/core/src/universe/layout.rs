@@ -314,10 +314,24 @@ mod tests {
 
     #[test]
     fn demo_universe_reads_as_galaxies() {
-        for (filter, planets, galaxies) in [(Spotify, 30, 5), (Youtube, 30, 5), (Both, 60, 10)] {
+        // In Both, a group's artists and channels share 2 of their 4 tags, so a group may become one
+        // Galaxy across Sources. No Galaxy holds more than one group.
+        for (filter, planets, galaxies) in [
+            (Spotify, 30, 5..=5),
+            (Youtube, 30, 5..=5),
+            (Both, 60, 5..=10),
+        ] {
             let u = demo_universe(filter);
             assert_eq!(u.planets.len(), planets, "{filter:?}");
-            assert_eq!(u.galaxies.len(), galaxies, "{filter:?}");
+            assert!(
+                galaxies.contains(&u.galaxies.len()),
+                "{filter:?}: {}",
+                u.galaxies.len()
+            );
+            for g in &u.galaxies {
+                let size = u.planets.iter().filter(|p| p.galaxy == g.id).count();
+                assert!(size <= 12, "{filter:?}: a Galaxy of {size}");
+            }
             assert!(
                 u.links.len() >= planets,
                 "{filter:?}: {} Links",

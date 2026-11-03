@@ -4,6 +4,7 @@
 
 use crate::error::Result;
 use crate::model::{InterestMap, Play, Source};
+use crate::roast::Anchor;
 use crate::store::Store;
 use crate::universe::{self, Universe, UniverseFilter, UniverseInput};
 use serde::{Deserialize, Serialize};
@@ -30,6 +31,10 @@ pub struct Digest {
     pub spotify: Option<SourceDigest>,
     pub youtube: Option<SourceDigest>,
     pub galaxies: Vec<GalaxyDigest>,
+    /// The heaviest member of each Galaxy, by id. It stays on this computer: a Roast's Galaxy names are
+    /// tied to these, not to ids that the next import can shift.
+    #[serde(skip)]
+    pub anchors: HashMap<u32, Anchor>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -352,6 +357,18 @@ fn source_digest(
     })
 }
 
+/// Planets come heaviest first, so the first member found is the heaviest.
+fn anchors(universe: &Universe) -> HashMap<u32, Anchor> {
+    let mut anchors = HashMap::new();
+    for p in &universe.planets {
+        anchors.entry(p.galaxy).or_insert_with(|| Anchor {
+            source: p.source,
+            creator: p.name.clone(),
+        });
+    }
+    anchors
+}
+
 /// Ids stay as they are, so a Provider's Galaxy names can find their Galaxy again.
 fn galaxies(universe: &Universe) -> Vec<GalaxyDigest> {
     let members = |id| {
@@ -415,6 +432,7 @@ pub fn build(
         spotify: source_digest(plays, Source::Spotify, interests, offset),
         youtube: source_digest(plays, Source::Youtube, interests, offset),
         galaxies: galaxies(universe),
+        anchors: anchors(universe),
     };
     fit(&mut digest);
     digest
