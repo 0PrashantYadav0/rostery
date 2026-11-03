@@ -176,3 +176,18 @@ export interface ExportResult {
   dir: string;
   bytes: number;
 }
+
+export type DeployTarget = 'github' | 'vercel';
+
+/** No token ever reaches the webview, only who it belongs to. */
+export interface DeployStatus {
+  github: string | null;
+  /** Connected through a logged-in gh, which Rostery can use but not forget. */
+  githubThroughGh: boolean;
+  vercel: boolean;
+}
+
+export interface DeployResult {
+  url: string;
+  dashboardUrl: string;
+}

@@ -10,6 +10,8 @@ rostery-core = { version = "0.1.0", path = "../crates/core" }
 tauri = { version = "2.12.5", features = [] }
 tauri-plugin-dialog = "2.8.4"
 tauri-plugin-opener = "2.7.2"
+# macOS Keychain, or a Secret Service such as GNOME Keyring on Linux. Pure Rust crypto, so no OpenSSL.
+keyring = { version = "3", features = ["apple-native", "sync-secret-service", "crypto-rust"] }
 
 [build-dependencies]
 tauri-build = { version = "2.7.4", features = [] }

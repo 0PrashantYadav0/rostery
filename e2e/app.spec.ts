@@ -4621,3 +4621,99 @@ test('Tab reaches the Share choices and Export in WebKit too', async ({ page }) 
   expect(reached).toContain('checkbox');
   expect(reached).toContain('Export');
 });
+
+const viaGh = { github: 'sam', githubThroughGh: true, vercel: false };
+
+test('github publish shows url', async ({ page }) => {
+  const published: unknown[] = [];
+  await installMockIpc(page, {
+    ...withHistory,
+    latest_roast: () => aRoast,
+    deploy_status: () => viaGh,
+    deploy_github: (args: unknown) => (published.push(args), { url: 'https://sam.github.io/rostery-universe/', dashboardUrl: 'https://github.com/sam/rostery-universe' }),
+  });
+  await openShare(page);
+  // A logged-in gh connects with no click, and Rostery cannot disconnect it.
+  await expect(page.getByText('Connected as sam.')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Disconnect' })).toHaveCount(0);
+  await expect(page.getByText('The repo rostery-universe and its site are public.')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Publish to GitHub Pages' }).click();
+  await page.getByRole('group', { name: 'Confirm publishing' }).getByRole('button', { name: 'Publish' }).click();
+  await expect(page.getByText('https://sam.github.io/rostery-universe/')).toBeVisible();
+  await expect(page.getByText('GitHub Pages can take a minute to show a new site.')).toBeVisible();
+  expect(published).toEqual([
+    {
+      repo: 'rostery-universe',
+      opts: { displayName: 'Anonymous', includeRoast: true, includeSpotify: true, includeYoutube: true, includeItemTitles: false },
+    },
+  ]);
+});
+
+test('publish asks for confirmation', async ({ page }) => {
+  let published = 0;
+  await installMockIpc(page, {
+    ...withHistory,
+    latest_roast: () => aRoast,
+    deploy_status: () => viaGh,
+    deploy_github: () => (published++, { url: 'https://sam.github.io/mine/', dashboardUrl: '' }),
+  });
+  await openShare(page);
+  await page.getByLabel('Repo name').fill('mine');
+  await page.getByRole('button', { name: 'Publish to GitHub Pages' }).click();
+  const confirm = page.getByRole('group', { name: 'Confirm publishing' });
+  await expect(confirm).toContainText('Publish your Share Site to GitHub Pages as mine, where anyone can see it?');
+  expect(published).toBe(0);
+  await confirm.getByRole('button', { name: 'Cancel' }).click();
+  await expect(confirm).toHaveCount(0);
+  expect(published).toBe(0);
+});
+
+test('github connects with a pasted token, which can be forgotten', async ({ page }) => {
+  let status = { github: null as string | null, githubThroughGh: false, vercel: false };
+  const calls: unknown[] = [];
+  await installMockIpc(page, {
+    ...withHistory,
+    deploy_status: () => status,
+    open_token_page: (args: unknown) => {
+      calls.push(['open', args]);
+    },
+    save_deploy_token: (args: { token: string }) => {
+      calls.push(['save', args]);
+      status = { ...status, github: 'sam' };
+    },
+    forget_deploy_token: (args: unknown) => {
+      calls.push(['forget', args]);
+      status = { ...status, github: null };
+    },
+  });
+  await openShare(page);
+  await page.getByRole('button', { name: 'Connect GitHub Pages' }).click();
+  await expect(page.getByText("GitHub's page for a new token with the public_repo scope")).toBeVisible();
+  await page.getByLabel('Token').fill('ghp_secret');
+  await page.getByRole('button', { name: 'Save token' }).click();
+  await expect(page.getByText('Connected as sam.')).toBeVisible();
+  await expect(page.getByLabel('Token')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Disconnect' }).click();
+  await expect(page.getByRole('button', { name: 'Connect GitHub Pages' })).toBeVisible();
+  expect(calls).toEqual([
+    ['open', { target: 'github' }],
+    ['save', { target: 'github', token: 'ghp_secret' }],
+    ['forget', { target: 'github' }],
+  ]);
+});
+
+test('a rejected token or a failed publish says why', async ({ page }) => {
+  await installMockIpc(page, {
+    ...withHistory,
+    latest_roast: () => aRoast,
+    deploy_status: () => viaGh,
+    deploy_github: () => {
+      throw new Error('GitHub did not accept your token, so it may have expired or been revoked. Connect GitHub again on the Share screen.');
+    },
+  });
+  await openShare(page);
+  await page.getByRole('button', { name: 'Publish to GitHub Pages' }).click();
+  await page.getByRole('group', { name: 'Confirm publishing' }).getByRole('button', { name: 'Publish' }).click();
+  await expect(page.getByRole('alert')).toContainText('Connect GitHub again');
+});

@@ -1,5 +1,8 @@
+use crate::secrets;
 use rostery_core::{
-    demo, digest,
+    demo,
+    deploy::{self, DeployResult, DeployStatus},
+    digest,
     export::{self, ExportOptions, ExportResult, SiteFile},
     ingest::ImportSummary,
     interests::{self, CreatorToTag},
@@ -298,6 +301,116 @@ pub fn open_site_preview(app: AppHandle, state: State<'_, AppState>) -> Result<(
 pub fn reveal_site(app: AppHandle, state: State<'_, AppState>) -> Result<(), Error> {
     let index = exported_index(&state)?;
     app.opener().reveal_item_in_dir(index).map_err(not_opened)
+}
+
+const GITHUB_API: &str = "https://api.github.com";
+const GITHUB_TOKEN_PAGE: &str =
+    "https://github.com/settings/tokens/new?scopes=public_repo&description=Rostery";
+const VERCEL_TOKEN_PAGE: &str = "https://vercel.com/account/settings/tokens";
+
+/// Where a token goes, by the name the webview uses for it.
+fn token_name(target: &str) -> Result<&'static str, Error> {
+    match target {
+        "github" => Ok("github_token"),
+        "vercel" => Ok("vercel_token"),
+        _ => Err(Error::Deploy(format!(
+            "Rostery cannot publish to {target}."
+        ))),
+    }
+}
+
+/// The keychain first, then a logged-in `gh`, which is how GitHub connects with one click.
+fn github_token(gh: impl FnOnce() -> Option<String>) -> Result<Option<(String, bool)>, Error> {
+    if let Some(token) = secrets::get(token_name("github")?)? {
+        return Ok(Some((token, false)));
+    }
+    Ok(gh().map(|token| (token, true)))
+}
+
+fn gh_auth_token() -> Option<String> {
+    let path = llm::login_shell_path()?;
+    let out = std::process::Command::new("gh")
+        .args(["auth", "token", "--hostname", "github.com"])
+        .env("PATH", path)
+        .env("GH_PROMPT_DISABLED", "1")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let token = String::from_utf8(out.stdout).ok()?.trim().to_owned();
+    (out.status.success() && !token.is_empty()).then_some(token)
+}
+
+fn status_with(api: &str, gh: impl FnOnce() -> Option<String>) -> Result<DeployStatus, Error> {
+    let github = match github_token(gh)? {
+        Some((token, through_gh)) => {
+            deploy::github::login(api, &token)?.map(|login| (login, through_gh))
+        }
+        None => None,
+    };
+    Ok(DeployStatus {
+        github_through_gh: github.as_ref().is_some_and(|(_, through_gh)| *through_gh),
+        github: github.map(|(login, _)| login),
+        vercel: secrets::get(token_name("vercel")?)?.is_some(),
+    })
+}
+
+#[tauri::command(async)]
+pub fn deploy_status() -> Result<DeployStatus, Error> {
+    status_with(GITHUB_API, gh_auth_token)
+}
+
+/// Checked before it is kept, so a typo is caught here and not at the first publish.
+#[tauri::command(async)]
+pub fn save_deploy_token(target: String, token: String) -> Result<(), Error> {
+    let token = token.trim();
+    if target == "github" && deploy::github::login(GITHUB_API, token)?.is_none() {
+        return Err(Error::Deploy(
+            "GitHub did not accept that token. Make a new one with the public_repo scope, then paste \
+             it again."
+                .into(),
+        ));
+    }
+    secrets::set(token_name(&target)?, token)
+}
+
+#[tauri::command(async)]
+pub fn forget_deploy_token(target: String) -> Result<(), Error> {
+    secrets::delete(token_name(&target)?)
+}
+
+/// Fixed pages only, opened from here so the webview's opener stays limited to Source links.
+#[tauri::command]
+pub fn open_token_page(app: AppHandle, target: String) -> Result<(), Error> {
+    let url = match target.as_str() {
+        "github" => GITHUB_TOKEN_PAGE,
+        "vercel" => VERCEL_TOKEN_PAGE,
+        _ => {
+            return Err(Error::Deploy(format!(
+                "Rostery cannot publish to {target}."
+            )))
+        }
+    };
+    app.opener().open_url(url, None::<&str>).map_err(not_opened)
+}
+
+/// Exports fresh from `opts` first, so what goes out is what the Share screen shows.
+#[tauri::command(async)]
+pub fn deploy_github(
+    state: State<'_, AppState>,
+    repo: String,
+    opts: ExportOptions,
+) -> Result<DeployResult, Error> {
+    let (token, _) = github_token(gh_auth_token)?
+        .ok_or_else(|| Error::Deploy("Connect GitHub first, then publish.".into()))?;
+    if !deploy::github::valid_repo_name(&repo) {
+        return Err(Error::Deploy(format!(
+            "\"{repo}\" cannot be a GitHub repo name. Use up to 100 letters, digits, dots, hyphens \
+             and underscores."
+        )));
+    }
+    export_to(&state, &opts)?;
+    let files = deploy::read_site(&site_dir(&state))?;
+    deploy::github::publish(GITHUB_API, &token, &repo, &files)
 }
 
 #[cfg(all(test, debug_assertions))]

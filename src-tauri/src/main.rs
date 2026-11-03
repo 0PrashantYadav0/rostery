@@ -1,4 +1,5 @@
 mod commands;
+mod secrets;
 
 use tauri::{plugin, Manager, RunEvent, Runtime, Url};
 
@@ -50,7 +51,12 @@ fn main() {
             commands::default_system_prompt,
             commands::export_site,
             commands::open_site_preview,
-            commands::reveal_site
+            commands::reveal_site,
+            commands::deploy_status,
+            commands::save_deploy_token,
+            commands::forget_deploy_token,
+            commands::open_token_page,
+            commands::deploy_github
         ])
         .build(tauri::generate_context!())
         .expect("Rostery could not start")

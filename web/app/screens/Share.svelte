@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { errorMessage, exportSite, openSitePreview, revealSite, totals } from '../../shared/api';
-  import type { ExportOptions, ExportResult, Totals } from '../../shared/types';
+  import { deployGithub, deployStatus, errorMessage, exportSite, openSitePreview, revealSite, totals } from '../../shared/api';
+  import type { DeployStatus, ExportOptions, ExportResult, Totals } from '../../shared/types';
+  import Publish from '../Publish.svelte';
   import { roastRun as run } from '../roast-run.svelte';
 
   let { importing, missedError, stored }: { importing: boolean; missedError: string; stored: number } = $props();
@@ -19,6 +20,19 @@
   let result = $state.raw<ExportResult>();
   let problem = $state('');
   let working = $state(false);
+  let hosts = $state.raw<DeployStatus>();
+  let hostsProblem = $state('');
+
+  // Asks GitHub whose token it is, so it is its own call that can fail without taking the screen with it.
+  async function loadHosts() {
+    try {
+      hosts = await deployStatus();
+      hostsProblem = '';
+    } catch (e) {
+      hostsProblem = errorMessage(e);
+    }
+  }
+  loadHosts();
 
   // Runs when this screen opens and each time Sources finishes changing what is stored.
   $effect(() => {
@@ -132,6 +146,30 @@
       {result ? `Saved ${size(result.bytes)} to ${result.dir}. Open it in your browser to check it before you send it anywhere.` : ''}
     </p>
   </form>
+
+  <div class="hosts">
+    <h2>Publish</h2>
+    <p class="aside">Each publish builds the page again from the choices above, then sends it with your own account. Rostery keeps the token in your system keychain.</p>
+    {#if hostsProblem}
+      <p class="error" role="alert">{hostsProblem}</p>
+    {/if}
+    {#if hosts}
+      <Publish
+        target="github"
+        title="GitHub Pages"
+        connectedAs={hosts.github}
+        forgettable={!hosts.githubThroughGh}
+        tokenHelp="Your browser shows GitHub's page for a new token with the public_repo scope. Create it, then paste it here."
+        nameLabel="Repo name"
+        defaultName="rostery-universe"
+        publicNote={(name) => `The repo ${name} and its site are public. Anyone with the address can see them.`}
+        waitNote="GitHub Pages can take a minute to show a new site."
+        blocked={going.length ? '' : 'Choose your Roast or a Universe above first.'}
+        publish={(repo) => deployGithub(repo, opts)}
+        onchange={loadHosts}
+      />
+    {/if}
+  </div>
 </div>
 
 <style>
@@ -266,6 +304,22 @@
   .result {
     margin: 0;
     color: var(--dim);
+  }
+
+  .hosts {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    margin-top: 40px;
+  }
+
+  .hosts > h2 {
+    margin: 0;
+    font: 500 26px/1.2 var(--serif);
+  }
+
+  .hosts > p {
+    margin: 0;
   }
 
   .result:empty {

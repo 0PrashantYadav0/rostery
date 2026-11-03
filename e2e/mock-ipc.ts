@@ -20,7 +20,12 @@ export const CLAUDE_CODE = {
  */
 export async function installMockIpc(page: Page, handlers: Handlers) {
   // The Roast screen asks this before it offers the button, and most tests have no view on it.
-  const all: Handlers = { provider_disclosure: () => CLAUDE_CODE, creators_to_tag: () => [], ...handlers };
+  const all: Handlers = {
+    provider_disclosure: () => CLAUDE_CODE,
+    creators_to_tag: () => [],
+    deploy_status: () => ({ github: null, githubThroughGh: false, vercel: false }),
+    ...handlers,
+  };
   await page.exposeFunction('__mockIpc', (cmd: string, args: unknown) => {
     const handler = all[cmd];
     if (!handler) throw new Error(`No mock IPC handler for "${cmd}"`);
