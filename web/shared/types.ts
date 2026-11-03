@@ -110,6 +110,8 @@ export interface FinishedRoast {
   roast: StoredRoast;
   /** The sentence to show when it could not be saved. */
   notSaved: string | null;
+  /** The sentence to show when the tag step failed and the Roast went on without it. */
+  notTagged?: string | null;
 }
 
 export type LocalServer = 'ollama' | 'lmStudio';

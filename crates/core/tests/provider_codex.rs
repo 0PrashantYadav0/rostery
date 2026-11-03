@@ -361,7 +361,8 @@ fn codex_schema_for_interests_is_strict() {
         &both,
         LONG_ENOUGH,
     )
-    .unwrap();
+    // A reply naming nobody is a failed tag step. The schema it was sent is what this checks.
+    .unwrap_err();
 
     let schema: Value = serde_json::from_str(&fake.recorded("schema")).unwrap();
     assert_eq!(schema["type"], "object");

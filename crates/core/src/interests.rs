@@ -31,12 +31,35 @@ pub struct CreatorToTag {
     pub name: String,
 }
 
+/// One odd entry costs that entry and not the whole reply. A reply with no usable entry is no reply,
+/// so the parser keeps looking past an empty example to the real answer.
 #[derive(Deserialize)]
+#[serde(try_from = "RawReply")]
 struct Reply {
     creators: Vec<Answer>,
 }
 
-/// `source` is text so that one odd entry costs that entry and not the whole reply.
+#[derive(Deserialize)]
+struct RawReply {
+    creators: Vec<serde_json::Value>,
+}
+
+impl TryFrom<RawReply> for Reply {
+    type Error = &'static str;
+
+    fn try_from(raw: RawReply) -> std::result::Result<Self, Self::Error> {
+        let creators: Vec<Answer> = raw
+            .creators
+            .into_iter()
+            .filter_map(|entry| serde_json::from_value(entry).ok())
+            .collect();
+        if creators.is_empty() {
+            return Err("no Creator in the reply could be read");
+        }
+        Ok(Reply { creators })
+    }
+}
+
 #[derive(Deserialize)]
 struct Answer {
     source: String,
@@ -184,25 +207,32 @@ fn tag_with(
         ))
     })?;
 
-    // Read by who was asked about, so a name nobody asked about never gets anywhere.
-    let mut said: HashMap<(Source, &str), &[String]> = HashMap::new();
+    // Read by who was asked about, so a name nobody asked about never gets anywhere. Only a Creator the
+    // reply named counts as answered, so one it left out is asked again next time.
+    let mut said: HashMap<(Source, String), &[String]> = HashMap::new();
     for answer in &reply.creators {
         if let Some(source) = Source::from_db(answer.source.trim().to_lowercase().as_str()) {
-            said.entry((source, answer.name.trim()))
+            said.entry((source, answer.name.trim().to_lowercase()))
                 .or_insert(&answer.interests);
         }
     }
     let rows: Vec<(Source, &str, Vec<String>)> = asked
         .iter()
-        .flat_map(|a| {
-            let tags = said
-                .get(&(a.source, a.name.as_str()))
-                .map_or_else(Vec::new, |tags| normalised_all(tags));
+        .filter_map(|a| {
+            let tags = said.get(&(a.source, a.name.to_lowercase()))?;
+            Some((a, normalised_all(tags)))
+        })
+        .flat_map(|(a, tags)| {
             a.creators
                 .iter()
                 .map(move |creator| (a.source, *creator, tags.clone()))
         })
         .collect();
+    if rows.is_empty() {
+        return Err(Error::Provider(format!(
+            "{who} gave a reply that named none of the Creators it was asked about."
+        )));
+    }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64);
@@ -343,23 +373,81 @@ mod tests {
 
     #[test]
     fn a_creator_the_provider_gave_no_tags_is_not_sent_again() {
-        for reply in [
-            // Named with nothing, left out, and a list with nobody in it.
-            reply_of(&[("spotify", "Unknown", &[])]),
-            reply_of(&[("spotify", "Someone Else", &["jazz"])]),
-            r#"{"creators":[]}"#.to_owned(),
-        ] {
-            let mut store = store_with(&[spotify("Unknown", 0, 90)]);
-            let (result, seen) = tag(&mut store, &reply);
-            assert_eq!(result.unwrap(), 0, "{reply}");
-            assert_eq!(seen.len(), 1, "{reply}");
-            assert_eq!(tags_of(&store, Source::Spotify, "Unknown"), [] as [&str; 0]);
+        let mut store = store_with(&[spotify("Unknown", 0, 90)]);
+        let (result, seen) = tag(&mut store, &reply_of(&[("spotify", "Unknown", &[])]));
+        assert_eq!(result.unwrap(), 0);
+        assert_eq!(seen.len(), 1);
 
-            let (_, again) = tag(&mut store, "never read");
-            assert!(again.is_empty(), "{reply}");
-            // Asked about, with nothing to show for it, which is not an Interest.
-            assert!(store.interests().unwrap().is_empty(), "{reply}");
+        let (_, again) = tag(&mut store, "never read");
+        assert!(again.is_empty());
+        // Asked about, with nothing to show for it, which is not an Interest.
+        assert!(store.interests().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_creator_the_reply_left_out_is_asked_again() {
+        let mut store = store_with(&[spotify("Heavy", 0, 90), spotify("Light", DAY, 30)]);
+        let (result, _) = tag(&mut store, &reply_of(&[("spotify", "Heavy", &["jazz"])]));
+        assert_eq!(result.unwrap(), 1);
+        let left: Vec<String> = next_to_tag(&store, &both(&store))
+            .unwrap()
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(left, ["Light"]);
+    }
+
+    #[test]
+    fn a_reply_that_names_nobody_who_was_asked_marks_nobody() {
+        let mut store = store_with(&[spotify("Unknown", 0, 90)]);
+        let (result, _) = tag(
+            &mut store,
+            &reply_of(&[("spotify", "Someone Else", &["jazz"])]),
+        );
+        assert!(result.unwrap_err().to_string().contains("named none"));
+        assert_eq!(next_to_tag(&store, &both(&store)).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn one_odd_entry_costs_only_itself() {
+        let good = json!({"source": "spotify", "name": "Real", "interests": ["jazz"]});
+        for odd in [
+            json!({"source": "spotify", "name": "Other", "interests": null}),
+            json!({"source": "spotify", "name": "Other", "interests": "jazz"}),
+            json!({"source": "spotify", "name": "Other", "interests": [null]}),
+            json!({"source": "spotify", "name": null, "interests": []}),
+            json!({"name": "Other", "interests": []}),
+            json!(null),
+        ] {
+            let mut store = store_with(&[spotify("Real", 0, 90), spotify("Other", DAY, 30)]);
+            let reply = json!({"creators": [odd.clone(), good.clone()]}).to_string();
+            let (result, _) = tag(&mut store, &reply);
+            assert_eq!(result.unwrap(), 1, "{odd}");
+            assert_eq!(tags_of(&store, Source::Spotify, "Real"), ["jazz"], "{odd}");
         }
+    }
+
+    #[test]
+    fn a_name_in_another_case_still_counts() {
+        let mut store = store_with(&[spotify("Moth Season", 0, 90)]);
+        let (result, _) = tag(
+            &mut store,
+            &reply_of(&[("Spotify", "moth season", &["jazz"])]),
+        );
+        assert_eq!(result.unwrap(), 1);
+        assert_eq!(tags_of(&store, Source::Spotify, "Moth Season"), ["jazz"]);
+    }
+
+    #[test]
+    fn an_empty_example_before_the_answer_is_skipped() {
+        let mut store = store_with(&[spotify("Real", 0, 90)]);
+        let reply = format!(
+            r#"The format is {{"creators":[]}} so here is my answer: {}"#,
+            reply_of(&[("spotify", "Real", &["jazz"])])
+        );
+        let (result, _) = tag(&mut store, &reply);
+        assert_eq!(result.unwrap(), 1);
+        assert_eq!(tags_of(&store, Source::Spotify, "Real"), ["jazz"]);
     }
 
     #[test]
@@ -369,6 +457,8 @@ mod tests {
             "Sorry, no.",
             r#"{"tags":[]}"#,
             r#"{"creators":"none"}"#,
+            r#"{"creators":[]}"#,
+            r#"{"creators":[{"source":"spotify","name":"Heavy","interests":null}]}"#,
             "{",
         ] {
             let (result, seen) = tag(&mut store, bad);
@@ -425,13 +515,19 @@ mod tests {
             .map(|i| spotify(&format!("Creator {i:03}"), i * DAY, 1000 - i))
             .collect();
         let mut store = store_with(&plays);
-        let (_, seen) = tag(&mut store, r#"{"creators":[]}"#);
+        let named: Vec<String> = (0..100).map(|i| format!("Creator {i:03}")).collect();
+        let rows: Vec<(&str, &str, &[&str])> = named
+            .iter()
+            .map(|n| ("spotify", n.as_str(), &[] as &[&str]))
+            .collect();
+        let everyone = reply_of(&rows);
+        let (_, seen) = tag(&mut store, &everyone);
         let first = sent(&seen[0]);
         assert_eq!(first.len(), MAX_CREATORS);
         assert_eq!(first[0]["name"], "Creator 000");
         assert_eq!(first[79]["name"], "Creator 079");
 
-        let (_, seen) = tag(&mut store, r#"{"creators":[]}"#);
+        let (_, seen) = tag(&mut store, &everyone);
         let second = sent(&seen[0]);
         assert_eq!(second.len(), 20);
         assert_eq!(second[0]["name"], "Creator 080");
@@ -549,6 +645,32 @@ mod tests {
     }
 
     #[test]
+    fn one_shared_tag_of_three_still_makes_a_link() {
+        let mut store = store_with(&[
+            spotify("Lofi Artist", 0, 90),
+            youtube("Study Channel", 30 * DAY),
+        ]);
+        let (result, _) = tag(
+            &mut store,
+            &reply_of(&[
+                (
+                    "spotify",
+                    "Lofi Artist",
+                    &["lo-fi", "chillhop", "instrumental"],
+                ),
+                (
+                    "youtube",
+                    "Study Channel",
+                    &["lo-fi", "study music", "ambient"],
+                ),
+            ]),
+        );
+        assert_eq!(result.unwrap(), 2);
+        let link = linked(&both(&store), "Lofi Artist", "Study Channel").unwrap();
+        assert_eq!(link.shared, ["lo-fi"]);
+    }
+
+    #[test]
     fn tags_for_a_creator_who_left_while_the_provider_was_writing_are_not_kept() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("rostery.db");
@@ -624,7 +746,10 @@ mod tests {
                 {"source": "youtube", "name": "Channel"},
             ])
         );
-        let (_, seen) = tag(&mut store, r#"{"creators":[]}"#);
+        let (_, seen) = tag(
+            &mut store,
+            &reply_of(&[("spotify", "Band", &[]), ("youtube", "Channel", &[])]),
+        );
         assert_eq!(
             sent(&seen[0]),
             serde_json::to_value(&waiting)

@@ -118,6 +118,9 @@
   {#if unread}
     <button class="retry" tabindex="0" onclick={retry}>Try again</button>
   {/if}
+  {#if run.note}
+    <p class="note">{run.note}</p>
+  {/if}
 
   <!-- All of this was written by a Provider, so it only ever goes in as text. -->
   {#if run.latest && (known || unread)}
@@ -255,6 +258,11 @@
   .error {
     margin: 20px 0 0;
     color: #f08a7e;
+  }
+
+  .note {
+    margin: 20px 0 0;
+    color: var(--dim);
   }
 
   .retry {

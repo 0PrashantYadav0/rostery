@@ -9,6 +9,8 @@ class RoastRun {
   running = $state(false);
   phrase = $state('');
   error = $state('');
+  /** A calm note beside a finished Roast, such as a tag step that failed. */
+  note = $state('');
   /** Why the last Roast could not be read. This never stops a new one, which takes its place. */
   readError = $state('');
   latest = $state.raw<StoredRoast | null>(null);
@@ -49,17 +51,19 @@ class RoastRun {
     this.sendingTo = this.disclosure;
     this.outcome = null;
     this.error = '';
+    this.note = '';
     this.phrase = 'Reading your history';
     // Only the words on screen depend on this, so a Roast goes ahead without it.
     const stop = await onRoastProgress((phrase) => {
       if (this.running) this.phrase = phrase;
     }).catch(() => undefined);
     try {
-      const { roast, notSaved } = await generateRoast();
+      const { roast, notSaved, notTagged } = await generateRoast();
       this.#asked += 1;
       this.latest = roast;
       this.#unsaved = notSaved !== null;
       this.error = notSaved ?? '';
+      this.note = notTagged ?? '';
       this.readError = '';
       // Focus stays on the button, so without this a screen reader hears nothing when the wait ends.
       this.phrase = 'Your Roast is ready.';

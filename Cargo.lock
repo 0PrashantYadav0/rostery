@@ -2993,6 +2993,7 @@ name = "rostery-app"
 version = "0.1.0"
 dependencies = [
  "rostery-core",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

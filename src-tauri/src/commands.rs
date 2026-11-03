@@ -98,12 +98,16 @@ fn run_roast(state: &AppState, progress: impl Fn(&str) + Sync) -> Result<Finishe
     // Read once, here, so changing Settings during a Roast only changes the next one.
     let settings = Settings::load(&store)?;
     let provider = settings.provider_to_send_to()?;
-    // Tags are worth having and not worth a Roast, so a failure only goes to the log, and the next Roast
-    // asks again. What goes there is the same sentence a failed Roast would show, and it stays on this
-    // computer.
-    if let Err(e) = tag_new_creators(provider, &mut store, &progress) {
-        eprintln!("Rostery tagged no Creators this time, and the Roast went on: {e}");
-    }
+    // Tags are worth having and not worth a Roast, so a failure becomes a sentence beside the finished
+    // Roast, and the next Roast asks again.
+    let not_tagged = tag_new_creators(provider, &mut store, &progress)
+        .err()
+        .map(|e| {
+            format!(
+                "Rostery could not tag your Creators this time, so this Roast added no new Links. It \
+                 will ask again on your next Roast. {e}"
+            )
+        });
     // After that, since the demo can leave during the tag step, which has a long wait of its own.
     let from_demo = store.has_demo_data()?;
     let digest = digest::from_store(&store, now())?;
@@ -132,7 +136,10 @@ fn run_roast(state: &AppState, progress: impl Fn(&str) + Sync) -> Result<Finishe
                 .to_owned(),
         ));
     }
-    Ok(store.keep_roast(provider.label(), roast, now(), from_demo, SAVE_WAIT))
+    Ok(FinishedRoast {
+        not_tagged,
+        ..store.keep_roast(provider.label(), roast, now(), from_demo, SAVE_WAIT)
+    })
 }
 
 fn tag_new_creators(
@@ -288,6 +295,23 @@ mod tests {
             std::fs::write(self.dir.path().join("tag_reply"), reply).unwrap();
         }
 
+        /// A tag reply naming everyone the next tag step will ask about, each with no tags, which
+        /// settles them all.
+        fn answer_everyone(&self) {
+            let store = Store::open(&self.state.db_path).unwrap();
+            let both = universe::from_store(&store, UniverseFilter::Both).unwrap();
+            let creators: Vec<serde_json::Value> = interests::next_to_tag(&store, &both)
+                .unwrap()
+                .into_iter()
+                .map(|c| serde_json::json!({"source": c.source, "name": c.name, "interests": []}))
+                .collect();
+            let result = serde_json::json!({ "creators": creators }).to_string();
+            self.tag_reply(
+                &serde_json::json!({"type": "result", "is_error": false, "result": result})
+                    .to_string(),
+            );
+        }
+
         fn tag_calls(&self) -> usize {
             std::fs::read_to_string(self.dir.path().join("tag_calls"))
                 .map_or(0, |calls| calls.lines().count())
@@ -385,7 +409,8 @@ mod tests {
     #[test]
     fn a_roast_with_nobody_left_to_tag_says_nothing_about_tagging() {
         let rig = Rig::with_history(CAT_REPLY, REPLY);
-        run_roast(&rig.state, silent).unwrap();
+        rig.answer_everyone();
+        assert_eq!(run_roast(&rig.state, silent).unwrap().not_tagged, None);
         assert_eq!(rig.tag_calls(), 1);
 
         let said = Mutex::new(Vec::new());
@@ -402,20 +427,23 @@ mod tests {
     fn tagging_failure_does_not_stop_the_roast() {
         for reply in [
             REFUSED,
+            NO_TAGS,
             "not even JSON",
             r#"{"type":"result","is_error":false,"result":"no Interests here"}"#,
         ] {
             let rig = Rig::with_history(CAT_REPLY, REPLY);
             rig.tag_reply(reply);
 
-            let saved = run_roast(&rig.state, silent).unwrap().roast;
+            let finished = run_roast(&rig.state, silent).unwrap();
 
-            assert_eq!(saved.roast.headline, "Heard", "{reply}");
+            assert_eq!(finished.roast.roast.headline, "Heard", "{reply}");
+            let note = finished.not_tagged.expect(reply);
+            assert!(note.contains("could not tag"), "{note}");
             assert_eq!(rig.tag_calls(), 1, "{reply}");
             assert_eq!(rig.calls(), 1, "{reply}");
 
             // A failed call settled nobody, so the next Roast asks again, and one that works sticks.
-            rig.tag_reply(NO_TAGS);
+            rig.answer_everyone();
             run_roast(&rig.state, silent).unwrap();
             assert_eq!(rig.tag_calls(), 2, "{reply}");
             run_roast(&rig.state, silent).unwrap();
