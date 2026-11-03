@@ -31,6 +31,9 @@ pub enum Error {
     /// The system keychain could not be used. The message already says what to do next.
     #[error("{0}")]
     Secrets(String),
+    /// A Connection to Spotify or YouTube went wrong. The message already says what to do next.
+    #[error("{0}")]
+    Connection(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

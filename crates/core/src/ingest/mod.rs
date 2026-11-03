@@ -403,7 +403,7 @@ fn played_at(time: &str, earliest: i64, now: i64) -> Option<i64> {
 
 /// `2024-03-01T13:05:42Z` or `2024-03-01 13:05` as Unix seconds. Both Sources write UTC, and
 /// Spotify's account format has no seconds. Anything after the seconds (fraction, `Z`) is ignored.
-fn parse_utc(s: &str) -> Option<i64> {
+pub(crate) fn parse_utc(s: &str) -> Option<i64> {
     let b = s.as_bytes();
     let num = |from: usize, to: usize| -> Option<i64> {
         let digits = b.get(from..to)?;

@@ -10,7 +10,9 @@ pub mod ingest;
 pub mod interests;
 pub mod llm;
 pub mod model;
+pub mod oauth;
 pub mod roast;
+pub mod spotify_api;
 pub mod store;
 pub mod universe;
 

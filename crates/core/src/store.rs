@@ -262,6 +262,87 @@ impl Store {
         Ok(removed)
     }
 
+    /// The newest Play of this Source and Origin.
+    pub fn latest_played_at(&self, source: Source, origin: Origin) -> Result<Option<i64>> {
+        Ok(self.conn.query_row(
+            "SELECT MAX(played_at) FROM plays WHERE source = ?1 AND origin = ?2",
+            [source.as_str(), origin.as_str()],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// One transaction. Everything one origin says about one Source's Creators, replacing all it said
+    /// before, so a Creator who fell off the list loses what it said about them.
+    pub fn replace_interests(
+        &mut self,
+        source: Source,
+        origin: &str,
+        rows: &[(String, Vec<String>)],
+        fetched_at: i64,
+    ) -> Result<u64> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM interests WHERE source = ?1 AND origin = ?2",
+            [source.as_str(), origin],
+        )?;
+        let mut kept = 0;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR REPLACE INTO interests (source, creator, interest, origin, fetched_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            for (creator, interests) in rows {
+                for interest in interests {
+                    kept += stmt.execute(params![
+                        source.as_str(),
+                        creator,
+                        interest,
+                        origin,
+                        fetched_at
+                    ])? as u64;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(kept)
+    }
+
+    /// One transaction. What a Connection brought for this Source: its Plays, the Affinities of these
+    /// kinds, the Interests from `interest_origin`, and AI tags for any Creator it leaves with nothing,
+    /// since tags are only asked for what is stored. Export data stays. Returns how many Plays went.
+    pub fn delete_api_data(
+        &mut self,
+        source: Source,
+        kinds: &[&str],
+        interest_origin: &str,
+    ) -> Result<u64> {
+        let tx = self.conn.transaction()?;
+        let plays = tx.execute(
+            "DELETE FROM plays WHERE source = ?1 AND origin = 'api'",
+            [source.as_str()],
+        )?;
+        for kind in kinds {
+            tx.execute(
+                "DELETE FROM affinities WHERE source = ?1 AND kind = ?2",
+                [source.as_str(), kind],
+            )?;
+        }
+        tx.execute(
+            "DELETE FROM interests WHERE source = ?1 AND origin = ?2",
+            [source.as_str(), interest_origin],
+        )?;
+        tx.execute(
+            &format!(
+                "DELETE FROM interests WHERE source = ?1 AND origin = '{AI_ORIGIN}'
+                 AND creator NOT IN (SELECT creator FROM plays WHERE source = ?1)
+                 AND creator NOT IN (SELECT creator FROM affinities WHERE source = ?1)"
+            ),
+            [source.as_str()],
+        )?;
+        tx.commit()?;
+        Ok(plays as u64)
+    }
+
     pub fn has_demo_data(&self) -> Result<bool> {
         Ok(self.conn.query_row(
             "SELECT EXISTS (SELECT 1 FROM plays WHERE origin = 'demo')",
@@ -594,6 +675,13 @@ impl Store {
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![key, serde_json::to_string(value)?],
         )?;
+        Ok(())
+    }
+
+    /// Gone already is fine.
+    pub fn delete_setting(&self, key: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM settings WHERE key = ?1", [key])?;
         Ok(())
     }
 }
