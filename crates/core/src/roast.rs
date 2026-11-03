@@ -304,7 +304,7 @@ pub fn generate(p: &Provider, digest: &Digest, voice: &str, timeout: Duration) -
 
 /// Each name gets the heaviest member of its Galaxy in the Digest it was written from, and a name for a
 /// Galaxy the Digest did not hold goes. Whatever anchor a Provider wrote is replaced.
-fn anchored(mut roast: Roast, digest: &Digest) -> Roast {
+pub fn anchored(mut roast: Roast, digest: &Digest) -> Roast {
     roast.galaxy_names.retain_mut(|galaxy| {
         galaxy.anchor = digest.anchors.get(&galaxy.id).cloned();
         galaxy.anchor.is_some()

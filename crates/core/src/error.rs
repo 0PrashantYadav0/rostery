@@ -22,6 +22,9 @@ pub enum Error {
     /// Settings that cannot be kept as they are. The message already says what to do next.
     #[error("{0}")]
     Settings(String),
+    /// A Share Site that could not be built or written. The message already says what to do next.
+    #[error("{0}")]
+    Export(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

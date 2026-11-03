@@ -4,6 +4,7 @@
 pub mod demo;
 pub mod digest;
 pub mod error;
+pub mod export;
 pub mod ingest;
 pub mod interests;
 pub mod llm;
