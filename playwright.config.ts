@@ -2,6 +2,8 @@ import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
   testDir: 'e2e',
+  // The Share Site tests open sites built from demo data by a Rust example.
+  globalSetup: './e2e/share-setup.ts',
   // Chromium draws in software here, so a sky of many Planets on a busy machine takes its time.
   timeout: 60_000,
   expect: { timeout: 15_000 },

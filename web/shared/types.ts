@@ -154,3 +154,25 @@ export interface CreatorToTag {
   source: Source;
   name: string;
 }
+
+export interface ExportOptions {
+  displayName: string;
+  includeRoast: boolean;
+  includeSpotify: boolean;
+  includeYoutube: boolean;
+  includeItemTitles: boolean;
+}
+
+/** What a Share Site holds. Rostery has already left out everything the person did not choose. */
+export interface SharePayload {
+  displayName: string;
+  generatedAt: number;
+  roast: Roast | null;
+  universes: Partial<Record<UniverseFilter, Universe>>;
+  attribution: string[];
+}
+
+export interface ExportResult {
+  dir: string;
+  bytes: number;
+}

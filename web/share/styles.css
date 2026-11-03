@@ -1,0 +1,7 @@
+/* The app fills a window. This is a page that scrolls. */
+html,
+body,
+#share {
+  height: auto;
+  min-height: 100%;
+}

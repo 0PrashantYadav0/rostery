@@ -47,6 +47,22 @@ describe('UniverseView', () => {
   });
 });
 
+describe('the Share Site', () => {
+  const { files, packages } = reach(resolve(web, 'share/main.ts'));
+
+  it('imports nothing from Tauri, so it runs with no app behind it', () => {
+    expect(files.map((f) => f.slice(web.length))).toContain('/universe/UniverseView.svelte');
+    expect(packages.filter((p) => p.includes('tauri'))).toEqual([]);
+  });
+
+  it('takes only the Dial and the global styles from the app', () => {
+    expect(files.filter((f) => f.startsWith(resolve(web, 'app'))).map((f) => f.slice(web.length)).sort()).toEqual([
+      '/app/Dial.svelte',
+      '/app/styles.css',
+    ]);
+  });
+});
+
 describe('the app may only open Source links', () => {
   const capability = JSON.parse(readFileSync(resolve(web, '../src-tauri/capabilities/default.json'), 'utf8'));
 
