@@ -306,7 +306,10 @@ pub fn reveal_site(app: AppHandle, state: State<'_, AppState>) -> Result<(), Err
 const GITHUB_API: &str = "https://api.github.com";
 const GITHUB_TOKEN_PAGE: &str =
     "https://github.com/settings/tokens/new?scopes=public_repo&description=Rostery";
-const VERCEL_TOKEN_PAGE: &str = "https://vercel.com/account/settings/tokens";
+const VERCEL_TOKEN_PAGE: &str = "https://vercel.com/account/tokens";
+const VERCEL_API: &str = "https://api.vercel.com";
+/// How often to ask whether a Vercel deployment is ready. It gives up after 120 tries.
+const VERCEL_POLL: Duration = Duration::from_secs(2);
 
 /// Where a token goes, by the name the webview uses for it.
 fn token_name(target: &str) -> Result<&'static str, Error> {
@@ -363,6 +366,7 @@ pub fn deploy_status() -> Result<DeployStatus, Error> {
 #[tauri::command(async)]
 pub fn save_deploy_token(target: String, token: String) -> Result<(), Error> {
     let token = token.trim();
+    let name = token_name(&target)?;
     if target == "github" && deploy::github::login(GITHUB_API, token)?.is_none() {
         return Err(Error::Deploy(
             "GitHub did not accept that token. Make a new one with the public_repo scope, then paste \
@@ -370,7 +374,12 @@ pub fn save_deploy_token(target: String, token: String) -> Result<(), Error> {
                 .into(),
         ));
     }
-    secrets::set(token_name(&target)?, token)
+    if target == "vercel" && !deploy::vercel::accepts(VERCEL_API, token)? {
+        return Err(Error::Deploy(
+            "Vercel did not accept that token. Make a new one, then paste it again.".into(),
+        ));
+    }
+    secrets::set(name, token)
 }
 
 #[tauri::command(async)]
@@ -411,6 +420,20 @@ pub fn deploy_github(
     export_to(&state, &opts)?;
     let files = deploy::read_site(&site_dir(&state))?;
     deploy::github::publish(GITHUB_API, &token, &repo, &files)
+}
+
+/// Exports fresh from `opts` first, as `deploy_github` does.
+#[tauri::command(async)]
+pub fn deploy_vercel(
+    state: State<'_, AppState>,
+    project: String,
+    opts: ExportOptions,
+) -> Result<DeployResult, Error> {
+    let token = secrets::get(token_name("vercel")?)?
+        .ok_or_else(|| Error::Deploy("Connect Vercel first, then publish.".into()))?;
+    export_to(&state, &opts)?;
+    let files = deploy::read_site(&site_dir(&state))?;
+    deploy::vercel::publish(VERCEL_API, &token, &project, &files, VERCEL_POLL)
 }
 
 #[cfg(all(test, debug_assertions))]

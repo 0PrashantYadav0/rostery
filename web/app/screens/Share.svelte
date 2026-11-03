@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { deployGithub, deployStatus, errorMessage, exportSite, openSitePreview, revealSite, totals } from '../../shared/api';
+  import { deployGithub, deployStatus, deployVercel, errorMessage, exportSite, openSitePreview, revealSite, totals } from '../../shared/api';
   import type { DeployStatus, ExportOptions, ExportResult, Totals } from '../../shared/types';
   import Publish from '../Publish.svelte';
   import { roastRun as run } from '../roast-run.svelte';
@@ -166,6 +166,20 @@
         waitNote="GitHub Pages can take a minute to show a new site."
         blocked={going.length ? '' : 'Choose your Roast or a Universe above first.'}
         publish={(repo) => deployGithub(repo, opts)}
+        onchange={loadHosts}
+      />
+      <Publish
+        target="vercel"
+        title="Vercel"
+        connectedAs={hosts.vercel ? 'your Vercel account' : null}
+        forgettable
+        tokenHelp="Your browser shows Vercel's page for tokens. Create one, then paste it here."
+        nameLabel="Project name"
+        defaultName="rostery-universe"
+        publicNote={(name) => `The Vercel project ${name} and its site are public. Anyone with the address can see them.`}
+        waitNote="Rostery waited until Vercel said the site was ready, so it is live now."
+        blocked={going.length ? '' : 'Choose your Roast or a Universe above first.'}
+        publish={(project) => deployVercel(project, opts)}
         onchange={loadHosts}
       />
     {/if}

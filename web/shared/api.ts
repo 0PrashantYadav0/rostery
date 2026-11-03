@@ -35,6 +35,8 @@ export const forgetDeployToken = (target: DeployTarget) => invoke<void>('forget_
 export const openTokenPage = (target: DeployTarget) => invoke<void>('open_token_page', { target });
 /** Exports fresh from `opts`, then publishes. */
 export const deployGithub = (repo: string, opts: ExportOptions) => invoke<DeployResult>('deploy_github', { repo, opts });
+/** Exports fresh from `opts`, publishes, and waits until Vercel says the deployment is ready. */
+export const deployVercel = (project: string, opts: ExportOptions) => invoke<DeployResult>('deploy_vercel', { project, opts });
 
 /** A short phrase each time a running Roast has something new to say. */
 export const onRoastProgress = (handler: (phrase: string) => void) =>

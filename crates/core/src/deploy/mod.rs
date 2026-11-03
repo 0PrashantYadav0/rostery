@@ -1,6 +1,7 @@
 //! Publishing a Share Site. Rostery talks to a host's API with the person's own token, and to nothing else.
 
 pub mod github;
+pub mod vercel;
 
 use crate::error::{Error, Result};
 use crate::export::SiteFile;
@@ -65,6 +66,49 @@ pub(crate) fn agent() -> ureq::Agent {
             .max_redirects(0)
             .build(),
     )
+}
+
+/// One request to a host's API with the person's token. Gives the status and whatever JSON came back.
+pub(crate) fn call(
+    host: &str,
+    method: &str,
+    url: &str,
+    token: &str,
+    headers: &[(&str, &str)],
+    body: Option<&Value>,
+) -> Result<(u16, Value)> {
+    let unreachable = |e: &dyn std::fmt::Display| {
+        Error::Deploy(format!(
+            "Rostery could not reach {host}: {e}. Check your connection, then try again."
+        ))
+    };
+    let mut request = ureq::http::Request::builder()
+        .method(method)
+        .uri(url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("User-Agent", "Rostery");
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let agent = agent();
+    let outcome = match body {
+        Some(body) => agent.run(
+            request
+                .header("Content-Type", "application/json")
+                .body(serde_json::to_vec(body)?)
+                .map_err(|e| unreachable(&e))?,
+        ),
+        None => agent.run(request.body(()).map_err(|e| unreachable(&e))?),
+    };
+    let mut response = outcome.map_err(|e| unreachable(&e))?;
+    let status = response.status().as_u16();
+    let text = response
+        .body_mut()
+        .with_config()
+        .limit(4 << 20)
+        .read_to_string()
+        .map_err(|e| unreachable(&e))?;
+    Ok((status, serde_json::from_str(&text).unwrap_or(Value::Null)))
 }
 
 /// A host's own words about what went wrong, kept short.

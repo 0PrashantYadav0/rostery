@@ -1,7 +1,7 @@
 //! GitHub Pages through the REST API: a repo Rostery created, one commit holding the whole site, and Pages
 //! serving that branch. The token is the person's own, with the public_repo scope.
 
-use super::{agent, said, DeployResult};
+use super::{call, said, DeployResult};
 use crate::error::{Error, Result};
 use crate::export::SiteFile;
 use base64::Engine;
@@ -16,38 +16,16 @@ const BRANCH_TRIES: u32 = 10;
 struct Api<'a> {
     base: &'a str,
     token: &'a str,
-    agent: ureq::Agent,
 }
 
 impl Api<'_> {
     fn call(&self, method: &str, path: &str, body: Option<&Value>) -> Result<(u16, Value)> {
         let url = format!("{}{path}", self.base.trim_end_matches('/'));
-        let auth = format!("Bearer {}", self.token);
-        let request = ureq::http::Request::builder()
-            .method(method)
-            .uri(&url)
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", API_VERSION)
-            .header("Authorization", auth)
-            .header("User-Agent", "Rostery");
-        let outcome = match body {
-            Some(body) => self.agent.run(
-                request
-                    .header("Content-Type", "application/json")
-                    .body(serde_json::to_vec(body)?)
-                    .map_err(|e| unreachable(&e))?,
-            ),
-            None => self
-                .agent
-                .run(request.body(()).map_err(|e| unreachable(&e))?),
-        };
-        let mut response = outcome.map_err(|e| unreachable(&e))?;
-        let status = response.status().as_u16();
-        let text = response
-            .body_mut()
-            .read_to_string()
-            .map_err(|e| unreachable(&e))?;
-        Ok((status, serde_json::from_str(&text).unwrap_or(Value::Null)))
+        let headers = [
+            ("Accept", "application/vnd.github+json"),
+            ("X-GitHub-Api-Version", API_VERSION),
+        ];
+        call("GitHub", method, &url, self.token, &headers, body)
     }
 
     /// A call that must answer one of `ok`, or it says what Rostery was doing when it did not.
@@ -87,12 +65,6 @@ fn rejected() -> Error {
     )
 }
 
-fn unreachable(e: &dyn std::fmt::Display) -> Error {
-    Error::Deploy(format!(
-        "Rostery could not reach GitHub: {e}. Check your connection, then try again."
-    ))
-}
-
 /// What GitHub allows in a repo name, checked before anything is sent.
 pub fn valid_repo_name(name: &str) -> bool {
     (1..=100).contains(&name.len())
@@ -105,11 +77,7 @@ pub fn valid_repo_name(name: &str) -> bool {
 
 /// Whose token this is, or nothing when GitHub no longer accepts it.
 pub fn login(api: &str, token: &str) -> Result<Option<String>> {
-    let gh = Api {
-        base: api,
-        token,
-        agent: agent(),
-    };
+    let gh = Api { base: api, token };
     let (status, user) = gh.call("GET", "/user", None)?;
     match status {
         200 => {}
@@ -144,11 +112,7 @@ fn publish_waiting(
              underscores."
         )));
     }
-    let gh = Api {
-        base: api,
-        token,
-        agent: agent(),
-    };
+    let gh = Api { base: api, token };
     let owner = login(api, token)?.ok_or_else(rejected)?;
     let path = format!("/repos/{owner}/{repo}");
     let url = page_url(&owner, repo);

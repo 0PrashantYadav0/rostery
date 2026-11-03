@@ -4717,3 +4717,36 @@ test('a rejected token or a failed publish says why', async ({ page }) => {
   await page.getByRole('group', { name: 'Confirm publishing' }).getByRole('button', { name: 'Publish' }).click();
   await expect(page.getByRole('alert')).toContainText('Connect GitHub again');
 });
+
+test('vercel publish shows url', async ({ page }) => {
+  let status = { github: null as string | null, githubThroughGh: false, vercel: false };
+  const calls: unknown[] = [];
+  await installMockIpc(page, {
+    ...withHistory,
+    latest_roast: () => aRoast,
+    deploy_status: () => status,
+    open_token_page: (args: unknown) => {
+      calls.push(['open', args]);
+    },
+    save_deploy_token: (args: unknown) => {
+      calls.push(['save', args]);
+      status = { ...status, vercel: true };
+    },
+    deploy_vercel: (args: unknown) => (calls.push(['deploy', args]), { url: 'https://my-universe.vercel.app', dashboardUrl: 'https://vercel.com/sam/my-universe' }),
+  });
+  await openShare(page);
+  await page.getByRole('button', { name: 'Connect Vercel' }).click();
+  await page.getByLabel('Token').fill('vc_secret');
+  await page.getByRole('button', { name: 'Save token' }).click();
+  await expect(page.getByText('Connected as your Vercel account.')).toBeVisible();
+  await page.getByLabel('Project name').fill('my-universe');
+  await expect(page.getByText('The Vercel project my-universe and its site are public.')).toBeVisible();
+  await page.getByRole('button', { name: 'Publish to Vercel' }).click();
+  await page.getByRole('group', { name: 'Confirm publishing' }).getByRole('button', { name: 'Publish' }).click();
+  await expect(page.getByText('https://my-universe.vercel.app')).toBeVisible();
+  expect(calls).toEqual([
+    ['open', { target: 'vercel' }],
+    ['save', { target: 'vercel', token: 'vc_secret' }],
+    ['deploy', { project: 'my-universe', opts: expect.objectContaining({ includeRoast: true }) }],
+  ]);
+});

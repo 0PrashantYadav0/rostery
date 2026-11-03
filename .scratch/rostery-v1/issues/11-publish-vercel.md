@@ -4,11 +4,11 @@
 
 **Blocked by:** 10
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Publishing creates a production deployment without needing a build
-- [ ] The app waits until the deployment is ready and shows the production URL
-- [ ] A failed deployment or a bad token gets a useful message
-- [ ] The token stays in the keychain
+- [x] Publishing creates a production deployment without needing a build
+- [x] The app waits until the deployment is ready and shows the production URL
+- [x] A failed deployment or a bad token gets a useful message
+- [x] The token stays in the keychain
 
 Stop point 4 follows this ticket.

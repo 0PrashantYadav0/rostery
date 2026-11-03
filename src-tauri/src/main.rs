@@ -56,7 +56,8 @@ fn main() {
             commands::save_deploy_token,
             commands::forget_deploy_token,
             commands::open_token_page,
-            commands::deploy_github
+            commands::deploy_github,
+            commands::deploy_vercel
         ])
         .build(tauri::generate_context!())
         .expect("Rostery could not start")
