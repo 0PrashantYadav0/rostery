@@ -259,15 +259,18 @@ fn run_cli(
     timeout: Duration,
     path: &str,
 ) -> io::Result<Option<Finished>> {
+    let input = input.map(no_mentions);
     // A Command of its own each time, because `run` adds a pre_exec that only works once per Command.
     let attempt = |path: &str| {
         let mut cmd = Command::new(binary(cli.binary));
         configure(&mut cmd);
-        cmd.env("PATH", path).env("NO_COLOR", "1");
+        cmd.env("PATH", path)
+            .env("NO_COLOR", "1")
+            .env("CLAUDE_CODE_DISABLE_ATTACHMENTS", "1");
         for key in REMOVED_ENV {
             cmd.env_remove(key);
         }
-        run(&mut cmd, input, timeout)
+        run(&mut cmd, input.as_deref(), timeout)
     };
     match attempt(path) {
         // The CLI may be newer than the PATH, or the shell may not have answered in time. Telling
@@ -277,6 +280,13 @@ fn run_cli(
         }
         outcome => outcome,
     }
+}
+
+/// `claude -p` reads the file behind an `@path` word in its prompt and sends it along, and `--tools ""`
+/// does not stop that. A stranger names a channel `@~/.ssh/id_rsa`, so no `@` reaches a CLI. Every `@`
+/// in a request sits inside a JSON string, where `\u0040` reads as the same character.
+fn no_mentions(text: &str) -> String {
+    text.replace('@', "\\u0040")
 }
 
 /// What the person hears when a CLI never got as far as an answer.
