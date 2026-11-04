@@ -6,6 +6,8 @@ export default defineConfig({
   globalSetup: './e2e/share-setup.ts',
   // Chromium draws in software here, so a sky of many Planets on a busy machine takes its time.
   timeout: 60_000,
+  // A shared CI runner is slower and busier than a laptop, and a few tests that watch the sky move feel it.
+  retries: process.env.CI ? 2 : 0,
   expect: { timeout: 15_000 },
   webServer: {
     // `pnpm test:e2e` builds first; this serves dist/app.
