@@ -38,7 +38,7 @@
   <h1>Your taste, drawn as a universe, then roasted.</h1>
   <p class="lede">
     Rostery reads your Spotify and YouTube history on this computer, turns the artists and channels you love into Planets, and has an AI
-    write you a Roast. Nothing leaves this computer unless you send it.
+    write you a Roast. Your history leaves this computer only when you choose to send it.
   </p>
 
   <ol class="steps">

@@ -32,6 +32,7 @@ fn main() {
             app.manage(commands::AppState {
                 db_path,
                 roast_running: Default::default(),
+                connecting: Default::default(),
             });
             Ok(())
         })

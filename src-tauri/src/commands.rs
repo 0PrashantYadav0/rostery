@@ -25,6 +25,21 @@ pub struct AppState {
     pub db_path: PathBuf,
     /// Held while a Roast runs, so a second one gets an error and not a second CLI.
     pub roast_running: Mutex<()>,
+    /// Held while a Connection signs in or syncs, which can write long after it started, so Delete
+    /// everything waits for neither.
+    pub connecting: Mutex<()>,
+}
+
+/// Held for the length of a Connection's work, or an error when one is already under way.
+fn connecting(state: &AppState) -> Result<std::sync::MutexGuard<'_, ()>, Error> {
+    match state.connecting.try_lock() {
+        Ok(held) => Ok(held),
+        Err(TryLockError::Poisoned(held)) => Ok(held.into_inner()),
+        Err(TryLockError::WouldBlock) => Err(Error::Connection(
+            "A Connection is already signing in or syncing. Wait for it to finish, then try again."
+                .into(),
+        )),
+    }
 }
 
 /// A Provider says nothing until it is done, so these only keep the person company while it works.
@@ -247,6 +262,15 @@ fn site_dir(state: &AppState) -> PathBuf {
     state.db_path.with_file_name("site")
 }
 
+/// The exported Share Site, which can hold what has just been deleted from the database.
+fn remove_site(state: &AppState) -> Result<(), Error> {
+    let site = site_dir(state);
+    if site.exists() {
+        std::fs::remove_dir_all(site)?;
+    }
+    Ok(())
+}
+
 fn export_to(state: &AppState, opts: &ExportOptions) -> Result<ExportResult, Error> {
     let store = Store::open(&state.db_path)?;
     let payload = export::build_payload(&store, opts, now())?;
@@ -310,6 +334,8 @@ const GITHUB_TOKEN_PAGE: &str =
     "https://github.com/settings/tokens/new?scopes=public_repo&description=Rostery";
 const VERCEL_TOKEN_PAGE: &str = "https://vercel.com/account/tokens";
 const VERCEL_API: &str = "https://api.vercel.com";
+/// The Vercel projects Rostery made, so it can publish to them again and to no one else's.
+const VERCEL_PROJECTS: &str = "vercel_projects";
 /// How often to ask whether a Vercel deployment is ready. It gives up after 120 tries.
 const VERCEL_POLL: Duration = Duration::from_secs(2);
 
@@ -433,9 +459,17 @@ pub fn deploy_vercel(
 ) -> Result<DeployResult, Error> {
     let token = secrets::get(token_name("vercel")?)?
         .ok_or_else(|| Error::Deploy("Connect Vercel first, then publish.".into()))?;
+    let store = Store::open(&state.db_path)?;
+    let mut ours: Vec<String> = store.get_setting(VERCEL_PROJECTS)?.unwrap_or_default();
+    let project = deploy::vercel::check_name(VERCEL_API, &token, &project, &ours)?;
     export_to(&state, &opts)?;
     let files = deploy::read_site(&site_dir(&state))?;
-    deploy::vercel::publish(VERCEL_API, &token, &project, &files, VERCEL_POLL)
+    let published = deploy::vercel::publish(VERCEL_API, &token, &project, &files, VERCEL_POLL)?;
+    if !ours.contains(&project) {
+        ours.push(project);
+        store.set_setting(VERCEL_PROJECTS, &ours)?;
+    }
+    Ok(published)
 }
 
 const SPOTIFY_REFRESH: &str = "spotify_refresh";
@@ -477,6 +511,7 @@ pub fn connect_spotify(
     client_id: String,
     consent: bool,
 ) -> Result<SyncSummary, Error> {
+    let _connecting = connecting(&state)?;
     spotify_api::check_connect(&client_id, consent)?;
     let client_id = client_id.trim().to_owned();
     let cfg = spotify_api::oauth_config(&client_id);
@@ -500,6 +535,7 @@ pub fn connect_spotify(
 
 #[tauri::command(async)]
 pub fn sync_spotify(state: State<'_, AppState>) -> Result<SyncSummary, Error> {
+    let _connecting = connecting(&state)?;
     let mut store = Store::open(&state.db_path)?;
     let not_connected = || Error::Connection("Spotify is not connected. Connect it first.".into());
     let client_id: String = store
@@ -522,6 +558,7 @@ pub fn disconnect_spotify(state: State<'_, AppState>) -> Result<Totals, Error> {
     let mut store = Store::open(&state.db_path)?;
     spotify_api::forget(&mut store)?;
     store.delete_setting(SPOTIFY_CLIENT)?;
+    remove_site(&state)?;
     store.totals()
 }
 
@@ -535,10 +572,18 @@ pub fn purge_old_youtube_data(db_path: &std::path::Path) {
     if !db_path.exists() {
         return;
     }
-    if let Err(e) =
-        Store::open(db_path).and_then(|mut store| store.purge_youtube_api_data(now() - DAYS_30))
-    {
-        eprintln!("Rostery could not remove YouTube API data older than 30 days: {e}");
+    match Store::open(db_path).and_then(|mut store| store.purge_youtube_api_data(now() - DAYS_30)) {
+        // An exported Share Site can hold what just went, so it goes too.
+        Ok(removed) if removed > 0 => {
+            let site = db_path.with_file_name("site");
+            if site.exists() {
+                if let Err(e) = std::fs::remove_dir_all(&site) {
+                    eprintln!("Rostery could not remove the Share Site folder: {e}");
+                }
+            }
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("Rostery could not remove YouTube API data older than 30 days: {e}"),
     }
 }
 
@@ -551,6 +596,7 @@ pub fn connect_youtube(
     client_id: String,
     client_secret: String,
 ) -> Result<SyncSummary, Error> {
+    let _connecting = connecting(&state)?;
     let (client_id, client_secret) = (client_id.trim().to_owned(), client_secret.trim().to_owned());
     if !client_id.ends_with(".apps.googleusercontent.com") || client_secret.is_empty() {
         return Err(Error::Connection(
@@ -581,6 +627,7 @@ pub fn connect_youtube(
 
 #[tauri::command(async)]
 pub fn sync_youtube(state: State<'_, AppState>) -> Result<SyncSummary, Error> {
+    let _connecting = connecting(&state)?;
     let mut store = Store::open(&state.db_path)?;
     let not_connected = || Error::Connection("YouTube is not connected. Connect it first.".into());
     let client_id: String = store
@@ -605,6 +652,7 @@ pub fn disconnect_youtube(state: State<'_, AppState>) -> Result<Totals, Error> {
     let mut store = Store::open(&state.db_path)?;
     youtube_api::forget(&mut store)?;
     store.delete_setting(GOOGLE_CLIENT)?;
+    remove_site(&state)?;
     store.totals()
 }
 
@@ -697,15 +745,32 @@ fn wipe_with(
             "Type DELETE in capitals to delete everything. Nothing was deleted.".into(),
         ));
     }
-    for name in SECRET_NAMES {
-        delete_secret(name)?;
-    }
+    // Either would write again after the wipe.
+    let busy = || {
+        Error::Settings(
+            "A Roast or a Connection is still running, and it would write again after the wipe. Wait \
+             for it to finish, then delete everything. Nothing was deleted."
+                .into(),
+        )
+    };
+    let _roast = state.roast_running.try_lock().map_err(|_| busy())?;
+    let _connecting = state.connecting.try_lock().map_err(|_| busy())?;
+    // History first, because a keychain that cannot be reached must not keep it here.
     Store::open(&state.db_path)?.wipe()?;
-    let site = site_dir(state);
-    if site.exists() {
-        std::fs::remove_dir_all(site)?;
+    remove_site(state)?;
+    let mut first_failure = None;
+    for name in SECRET_NAMES {
+        if let Err(e) = delete_secret(name) {
+            first_failure.get_or_insert(e);
+        }
     }
-    Ok(())
+    match first_failure {
+        None => Ok(()),
+        Some(e) => Err(Error::Secrets(format!(
+            "Your history, Roasts, settings and Share Site folder are deleted, but some tokens may \
+             still be in your system keychain. {e}"
+        ))),
+    }
 }
 
 /// Every row, every keychain entry and the Share Site folder. Published sites stay where they were
@@ -774,6 +839,7 @@ mod tests {
             let state = AppState {
                 db_path: dir.path().join("rostery.db"),
                 roast_running: Mutex::new(()),
+                connecting: Mutex::new(()),
             };
             let rig = Rig {
                 dir,
@@ -1355,5 +1421,58 @@ mod tests {
         let store = Store::open(&rig.state.db_path).unwrap();
         assert_eq!(store.totals().unwrap().spotify.plays, 0);
         assert!(!site_dir(&rig.state).exists());
+    }
+
+    #[test]
+    fn wipe_refuses_while_a_roast_or_connection_runs() {
+        let rig = Rig::with_history(CAT_REPLY, REPLY);
+        for lock in [&rig.state.roast_running, &rig.state.connecting] {
+            let _held = lock.lock().unwrap();
+            let message = wipe_with(&rig.state, "DELETE", |_| Ok(()))
+                .unwrap_err()
+                .to_string();
+            assert!(message.contains("still running"), "{message}");
+            assert!(
+                Store::open(&rig.state.db_path)
+                    .unwrap()
+                    .totals()
+                    .unwrap()
+                    .spotify
+                    .plays
+                    > 0
+            );
+        }
+    }
+
+    #[test]
+    fn a_keychain_that_fails_still_leaves_nothing_stored() {
+        let rig = Rig::with_history(CAT_REPLY, REPLY);
+        export_to(&rig.state, &ExportOptions::default()).unwrap();
+        let tried = Mutex::new(0);
+        let message = wipe_with(&rig.state, "DELETE", |_| {
+            *tried.lock().unwrap() += 1;
+            Err(Error::Secrets("No Secret Service is running.".into()))
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(message.contains("some tokens may still be"), "{message}");
+        assert_eq!(*tried.lock().unwrap(), SECRET_NAMES.len());
+        assert_eq!(
+            Store::open(&rig.state.db_path)
+                .unwrap()
+                .totals()
+                .unwrap()
+                .spotify
+                .plays,
+            0
+        );
+        assert!(!site_dir(&rig.state).exists());
+    }
+
+    #[test]
+    fn a_second_connection_at_once_is_refused() {
+        let rig = Rig::with_history(CAT_REPLY, REPLY);
+        let _first = connecting(&rig.state).unwrap();
+        assert!(connecting(&rig.state).is_err());
     }
 }

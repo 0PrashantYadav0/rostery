@@ -89,7 +89,8 @@ There are two frontend builds from one package. `dist/app` is loaded by the desk
 | Open Settings, or press Check again | A CLI's own login check, and `GET /models` to a local server. An address that is not this computer is only called once it is the chosen Provider, because it was saved on some other day and may be somebody else's device on this network. |
 | Connect to a Source | OAuth requests to that Source. |
 | Open a Planet's link | The system browser opens that artist or channel on Spotify or YouTube. |
-| Publish | The Share Site to GitHub or Vercel. It becomes public. |
+| Open the Share screen | With a saved GitHub token or a signed-in `gh`, `GET /user` to GitHub to name the account. |
+| Publish | The Share Site to GitHub or Vercel. It becomes public. Each GitHub publish is a parentless commit forced onto the branch, and Rostery only writes to a repo or Vercel project it made. |
 
 ## Data model
 
