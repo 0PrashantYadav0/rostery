@@ -4856,3 +4856,102 @@ test('youtube sync summary shows', async ({ page }) => {
   await card.getByRole('button', { name: 'Sync now' }).click();
   await expect(card.getByText('Added 41 subscribed and liked channels and 60 topics.')).toBeVisible();
 });
+
+test('first run shows welcome', async ({ page }) => {
+  let welcomed = false;
+  await installMockIpc(page, {
+    ...empty,
+    needs_welcome: () => !welcomed,
+    finish_welcome: () => {
+      welcomed = true;
+    },
+    provider_statuses: () => [{ id: 'claude-code', available: true, signedIn: true, detail: 'Signed in', sendsTo: '', models: [] }],
+  });
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Your taste, drawn as a universe, then roasted.' })).toBeVisible();
+  await expect(page.getByText('Nothing leaves this computer unless you send it.')).toBeVisible();
+  await expect(page.getByText('Ready here: Claude Code.')).toBeVisible();
+  await page.getByRole('button', { name: 'Add my history' }).click();
+  await expect(page.getByRole('heading', { name: 'Add your history' })).toBeVisible();
+  await expect.poll(() => welcomed).toBe(true);
+});
+
+test('welcome skips after data exists', async ({ page }) => {
+  await installMockIpc(page, { ...withHistory, needs_welcome: () => false });
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Sources', level: 1 })).toBeVisible();
+  await expect(page.getByText('Welcome to Rostery')).toHaveCount(0);
+});
+
+test('demo path reaches a universe', async ({ page }) => {
+  let demo = false;
+  await installMockIpc(page, {
+    ...withUniverse(),
+    needs_welcome: () => !demo,
+    finish_welcome: () => {},
+    load_demo: () => {
+      demo = true;
+      return someHistory;
+    },
+    totals: () => (demo ? someHistory : empty.totals()),
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Try it with demo data' }).click();
+  await page.getByRole('button', { name: 'Show my Universe' }).click();
+  await expect(page.getByRole('heading', { name: 'Universe', level: 1 })).toBeVisible();
+  await expect(page.getByText('Drawn on this computer, from the history stored here.')).toBeVisible();
+  await expect(page.locator('canvas')).toHaveCount(1);
+});
+
+test('delete everything needs typed confirmation', async ({ page }) => {
+  const asked: unknown[] = [];
+  await installMockIpc(page, {
+    ...withHistory,
+    ...settingsMocks().handlers,
+    wipe_everything: (args: unknown) => {
+      asked.push(args);
+    },
+  });
+  await openSettings(page);
+  const wipe = page.getByRole('button', { name: 'Delete everything' });
+  await expect(page.getByText('every token Rostery keeps in your system keychain')).toBeVisible();
+  await expect(wipe).toHaveAttribute('aria-disabled', 'true');
+  await wipe.click({ force: true });
+  await page.getByLabel('Type DELETE to confirm').fill('delete');
+  await wipe.click({ force: true });
+  expect(asked).toEqual([]);
+  await page.getByLabel('Type DELETE to confirm').fill('DELETE');
+  await expect(wipe).toHaveAttribute('aria-disabled', 'false');
+  await wipe.click();
+  await expect.poll(() => asked).toEqual([{ confirmation: 'DELETE' }]);
+});
+
+test('local api key field', async ({ page }) => {
+  const saved: unknown[] = [];
+  let held: string[] = [];
+  const mocks = settingsMocks();
+  await installMockIpc(page, {
+    ...withHistory,
+    ...mocks.handlers,
+    local_keys: () => held,
+    save_local_key: (args: { server: string }) => {
+      saved.push(args);
+      held = [args.server];
+    },
+    forget_local_key: (args: unknown) => {
+      saved.push(['forget', args]);
+      held = [];
+    },
+  });
+  await openSettings(page);
+  await page.getByRole('radio', { name: /Ollama/ }).check();
+  const key = page.getByLabel('API key, only if your server wants one');
+  await expect(key).toHaveAttribute('type', 'password');
+  await key.fill('sk-local');
+  await page.getByRole('button', { name: 'Save key' }).click();
+  await expect(page.getByText('Saved in your system keychain.')).toBeVisible();
+  await expect(key).toHaveValue('');
+  await page.getByRole('button', { name: 'Remove key' }).click();
+  await expect(page.getByText('Removed from your system keychain.')).toBeVisible();
+  expect(saved).toEqual([{ server: 'ollama', key: 'sk-local' }, ['forget', { server: 'ollama' }]]);
+});

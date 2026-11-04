@@ -20,12 +20,15 @@
 
   let {
     active,
+    stored = 0,
     importing = $bindable(false),
     onopen,
     onstored,
     onmissederror,
   }: {
     active: boolean;
+    /** Goes up when something else, such as the welcome's demo, changed what is stored. */
+    stored?: number;
     importing?: boolean;
     /** A file was dropped on another screen, and its progress and result show here. */
     onopen: () => void;
@@ -122,6 +125,14 @@
     // Its button is gone now, and focus would otherwise fall to the page.
     if (!hasDemo) tryDemo?.focus();
   }
+
+  // Something outside this screen stored history, so the totals here are stale.
+  let seen = 0;
+  $effect(() => {
+    if (stored === seen) return;
+    seen = stored;
+    refresh().catch((e) => (error = errorMessage(e)));
+  });
 
   onMount(() => {
     refresh().catch((e) => (error = errorMessage(e)));

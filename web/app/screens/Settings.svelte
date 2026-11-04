@@ -13,7 +13,8 @@
 
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { creatorsToTag, defaultSystemPrompt, digestPreview, errorMessage, getSettings, providerStatuses, saveSettings } from '../../shared/api';
+  import { creatorsToTag, defaultSystemPrompt, digestPreview, errorMessage, getSettings, providerStatuses, saveSettings, wipeEverything } from '../../shared/api';
+  import LocalKey from '../components/LocalKey.svelte';
   import type { CreatorToTag, Provider, ProviderId, ProviderStatus } from '../../shared/types';
   import { roastRun as run } from '../roast-run.svelte';
 
@@ -299,6 +300,24 @@
     (loadFailed ? retryButton : checkButton)?.focus();
   }
 
+  let wipeWord = $state('');
+  let wiping = $state(false);
+  let wipeProblem = $state('');
+
+  async function wipe() {
+    if (wipeWord !== 'DELETE' || wiping) return;
+    wiping = true;
+    wipeProblem = '';
+    try {
+      await wipeEverything(wipeWord);
+      // Every screen holds something that is gone now, so the app starts again, at its welcome.
+      location.reload();
+    } catch (e) {
+      wipeProblem = errorMessage(e);
+      wiping = false;
+    }
+  }
+
   onMount(() => {
     load();
     return () => {
@@ -376,6 +395,7 @@
                   {#if addressProblem}
                     <p class="error" role="alert">{addressProblem}</p>
                   {/if}
+                  <LocalKey server={provider.local.server} onchange={check} />
                 {/if}
                 <label>
                   <span>Model</span>
@@ -435,6 +455,24 @@
       {/if}
     </section>
   {/if}
+
+  <!-- Out of the settings check, so it works even when saved settings cannot be read. -->
+  <section class="danger" aria-labelledby="delete-name">
+    <h2 id="delete-name">Delete everything</h2>
+    <p>
+      Removes your stored history, every Roast, your settings, every token Rostery keeps in your system keychain, and the Share Site
+      folder. A site you published stays where you published it, so take it down there. This cannot be undone.
+    </p>
+    <label>
+      <span>Type DELETE to confirm</span>
+      <input tabindex="0" autocomplete="off" spellcheck="false" autocapitalize="characters" bind:value={wipeWord} />
+    </label>
+    <!-- aria-disabled, because a disabled button drops keyboard focus to the page. wipe() checks too. -->
+    <button tabindex="0" class="wipe" aria-disabled={wipeWord !== 'DELETE' || wiping} onclick={wipe}>Delete everything</button>
+    {#if wipeProblem}
+      <p class="error" role="alert">{wipeProblem}</p>
+    {/if}
+  </section>
 
   <dialog bind:this={dialog} aria-labelledby="digest-name">
     <!-- Everything but Close scrolls, so Close and its focus stay in view in the smallest window. -->
@@ -501,6 +539,33 @@
 
   section {
     margin-top: 32px;
+  }
+
+  .danger {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+    margin-top: 56px;
+    padding: 18px 20px;
+    border: 1px solid #8a3d36;
+    border-radius: 8px;
+  }
+
+  .danger p {
+    margin: 0;
+    color: var(--dim);
+  }
+
+  .danger label {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .wipe {
+    border-color: #f08a7e;
+    color: #f08a7e;
   }
 
   .heading {

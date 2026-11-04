@@ -4,9 +4,10 @@
 
 **Blocked by:** 11, 13
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] First launch shows a welcome flow, and later launches do not
-- [ ] The demo path reaches a Universe in a couple of clicks
-- [ ] Delete everything needs the word DELETE typed, then removes the database rows, keychain entries and site folder
-- [ ] `PRIVACY.md` lists what leaves the machine for each action, and how to disconnect and delete
+- [x] First launch shows a welcome flow, and later launches do not
+- [x] The demo path reaches a Universe in a couple of clicks
+- [x] Delete everything needs the word DELETE typed, then removes the database rows, keychain entries and site folder
+- [x] `PRIVACY.md` lists what leaves the machine for each action, and how to disconnect and delete
+- [x] A local server that wants an API key gets a field for it, kept in the keychain

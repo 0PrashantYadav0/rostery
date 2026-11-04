@@ -1,11 +1,13 @@
 <script lang="ts">
   import { tick } from 'svelte';
+  import { finishWelcome, needsWelcome } from '../shared/api';
   import { roastRun as run } from './roast-run.svelte';
   import Roast from './screens/Roast.svelte';
   import Settings, { unsaved } from './screens/Settings.svelte';
   import Share from './screens/Share.svelte';
   import Sources from './screens/Sources.svelte';
   import Universe from './screens/Universe.svelte';
+  import Welcome from './screens/Welcome.svelte';
 
   // The rest are placeholders for later screens.
   const rail = [
@@ -17,6 +19,14 @@
   ];
 
   let screen = $state('Sources');
+  // Only a first launch, or one after Delete everything, asks. A failure to ask just skips it.
+  let welcome = $state(false);
+  needsWelcome().then(
+    (needed) => (welcome = needed),
+    () => {},
+  );
+  // Bumped only by what happens outside Sources, so Sources does not refresh after its own work.
+  let storedElsewhere = $state(0);
   let importing = $state(false);
   // Goes up each time Sources finishes changing what is stored, so the Universe draws it again.
   let stored = $state(0);
@@ -36,6 +46,11 @@
   );
 
   function open(label: string) {
+    if (welcome) {
+      welcome = false;
+      // Remembering is a nicety. Failing it only means the welcome shows once more.
+      finishWelcome().catch(() => {});
+    }
     screen = label;
     // Sources shows it too, so it stops following the person once they can go and read it there.
     missedError = '';
@@ -61,7 +76,7 @@
           <button
             tabindex="0"
             disabled={!ready}
-            aria-current={label === screen ? 'page' : undefined}
+            aria-current={label === screen && !welcome ? 'page' : undefined}
             title={ready ? (label === 'Roast' ? roastMark?.words : undefined) : 'Not available yet'}
             onclick={() => open(label)}
           >
@@ -85,13 +100,24 @@
     {/if}
     <!-- Sources stays mounted, so an import keeps its place and its result while you look elsewhere. -->
     <Sources
-      active={screen === 'Sources'}
+      active={screen === 'Sources' && !welcome}
+      stored={storedElsewhere}
       bind:importing
       onopen={() => open('Sources')}
       onstored={() => (stored += 1)}
       onmissederror={(message) => (missedError = message)}
     />
-    {#if screen === 'Universe'}
+    {#if welcome}
+      <Welcome
+        onfinish={(label, demo) => {
+          if (demo) {
+            stored += 1;
+            storedElsewhere += 1;
+          }
+          open(label);
+        }}
+      />
+    {:else if screen === 'Universe'}
       <Universe {importing} {missedError} {stored} />
     {:else if screen === 'Roast'}
       <Roast {importing} {missedError} {stored} onsources={goToSources} />

@@ -50,6 +50,7 @@
 
 {#snippet heading()}
   <h1>Universe</h1>
+  <p class="here">Drawn on this computer, from the history stored here.</p>
   <p class="status" role="status">{status}</p>
   {#if missedError}
     <p role="alert">{missedError}</p>

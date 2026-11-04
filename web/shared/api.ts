@@ -4,7 +4,7 @@ import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebview, type DragDropEvent } from '@tauri-apps/api/webview';
 import { open } from '@tauri-apps/plugin-dialog';
 import { openUrl } from '@tauri-apps/plugin-opener';
-import type { Connections, CreatorToTag, DeployResult, DeployStatus, DeployTarget, Disclosure, ExportOptions, ExportResult, FinishedRoast, ImportSummary, ProviderStatus, Settings, StoredRoast, SyncSummary, Totals, Universe, UniverseFilter } from './types';
+import type { Connections, CreatorToTag, LocalServer, DeployResult, DeployStatus, DeployTarget, Disclosure, ExportOptions, ExportResult, FinishedRoast, ImportSummary, ProviderStatus, Settings, StoredRoast, SyncSummary, Totals, Universe, UniverseFilter } from './types';
 
 export const totals = () => invoke<Totals>('totals');
 export const loadDemo = () => invoke<Totals>('load_demo');
@@ -48,6 +48,15 @@ export const disconnectYoutube = () => invoke<Totals>('disconnect_youtube');
 /** A fixed page in the system browser, such as YouTube's terms. */
 export const openPolicyPage = (page: 'youtube-terms' | 'google-privacy' | 'spotify-developer-policy' | 'google-cloud-console' | 'spotify-dashboard') =>
   invoke<void>('open_policy_page', { page });
+/** Kept in the system keychain. An empty key removes it. */
+export const saveLocalKey = (server: LocalServer, key: string) => invoke<void>('save_local_key', { server, key });
+export const forgetLocalKey = (server: LocalServer) => invoke<void>('forget_local_key', { server });
+/** Which local servers have a key saved. The keys never reach the webview. */
+export const localKeys = () => invoke<LocalServer[]>('local_keys');
+export const needsWelcome = () => invoke<boolean>('needs_welcome');
+export const finishWelcome = () => invoke<void>('finish_welcome');
+/** Refused unless `confirmation` is exactly DELETE. */
+export const wipeEverything = (confirmation: string) => invoke<void>('wipe_everything', { confirmation });
 export const deployVercel = (project: string, opts: ExportOptions) => invoke<DeployResult>('deploy_vercel', { project, opts });
 
 /** A short phrase each time a running Roast has something new to say. */

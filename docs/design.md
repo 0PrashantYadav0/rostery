@@ -88,6 +88,7 @@ There are two frontend builds from one package. `dist/app` is loaded by the desk
 | The tag step, before a Roast | Up to 80 Creator names, each with its Source, to the same place the Digest goes. Each name goes through the Digest's `sanitize`. No Items and no counts. Each Creator goes once. The disclosure says so, and the See what gets sent dialog shows the exact names that would go next. |
 | Open Settings, or press Check again | A CLI's own login check, and `GET /models` to a local server. An address that is not this computer is only called once it is the chosen Provider, because it was saved on some other day and may be somebody else's device on this network. |
 | Connect to a Source | OAuth requests to that Source. |
+| Open a Planet's link | The system browser opens that artist or channel on Spotify or YouTube. |
 | Publish | The Share Site to GitHub or Vercel. It becomes public. |
 
 ## Data model
