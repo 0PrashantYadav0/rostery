@@ -377,7 +377,7 @@ fn a_server_that_wants_a_key_says_so_when_a_roast_asks() {
             .to_string();
         assert!(message.contains(&url), "{message}");
         assert!(message.contains(&code.to_string()), "{message}");
-        assert!(message.contains("cannot send one yet"), "{message}");
+        assert!(message.contains("Add the key under"), "{message}");
         assert!(message.contains("then try again"), "{message}");
         assert!(!message.contains("Check the model"), "{message}");
     }

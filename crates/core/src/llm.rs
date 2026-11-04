@@ -92,6 +92,14 @@ impl LocalServer {
         }
     }
 
+    /// Where its API key lives in the keychain.
+    pub fn key_name(self) -> &'static str {
+        match self {
+            LocalServer::Ollama => "ollama-api-key",
+            LocalServer::LmStudio => "lm-studio-api-key",
+        }
+    }
+
     pub fn default_url(self) -> &'static str {
         match self {
             LocalServer::Ollama => "http://127.0.0.1:11434/v1",
@@ -142,10 +150,8 @@ pub enum Provider {
         server: LocalServer,
         base_url: String,
         model: String,
-        /// Sent when present, and never written to the settings JSON. A key belongs in the keychain.
-        // ponytail: nothing in the app sets this yet, so a server that wants a key cannot be used, and
-        // its status and any Roast say so. Task 14 reads it from `secrets` and sets it here before
-        // `complete` and `statuses`, because this crate has no keychain.
+        /// Sent when present, and never written to the settings JSON. A key belongs in the keychain, which
+        /// this crate cannot reach, so the app fills it with `Settings::with_local_keys`.
         #[serde(skip)]
         api_key: Option<String>,
     },
@@ -613,8 +619,9 @@ fn local_unreachable(
 /// What a status and a Roast both say about a server that turned them away, for them to finish.
 fn wants_a_key(server: LocalServer, base_url: &str, code: u16) -> String {
     format!(
-        "The server at {base_url} answered {code}, so it wants an API key, and Rostery cannot send one \
-         yet. Turn that off in {}",
+        "The server at {base_url} answered {code}, so it wants an API key. Add the key under {} in \
+         Settings, or turn the key off in {}",
+        server.label(),
         server.label()
     )
 }
@@ -1179,6 +1186,20 @@ impl Settings {
     }
 
     /// The Provider a Digest may go to, which is only ever one the person chose.
+    /// Each local server's API key from `key`, a lookup in the keychain this crate cannot reach. What is
+    /// sent and what a status checks then both have it.
+    pub fn with_local_keys(mut self, key: impl Fn(LocalServer) -> Option<String>) -> Settings {
+        for p in std::iter::once(&mut self.provider).chain(self.others.iter_mut()) {
+            if let Provider::Local {
+                server, api_key, ..
+            } = p
+            {
+                *api_key = key(*server);
+            }
+        }
+        self
+    }
+
     pub fn provider_to_send_to(&self) -> Result<&Provider> {
         if self.choose_again {
             Err(Error::Settings(SETTINGS_LOST.to_owned()))
@@ -1682,6 +1703,45 @@ mod tests {
         assert!(saved.others.contains(&Provider::Codex {
             model: Some("gpt-test".into())
         }));
+    }
+
+    #[test]
+    fn local_key_reaches_the_provider() {
+        let local = |server| Provider::Local {
+            server,
+            base_url: server.default_url().into(),
+            model: "tiny".into(),
+            api_key: None,
+        };
+        let settings = Settings {
+            provider: local(LocalServer::Ollama),
+            others: vec![
+                local(LocalServer::LmStudio),
+                Provider::Codex { model: None },
+            ],
+            ..Settings::default()
+        }
+        .with_local_keys(|server| Some(format!("key for {}", server.key_name())));
+        let keys: Vec<Option<String>> = std::iter::once(&settings.provider)
+            .chain(&settings.others)
+            .map(|p| match p {
+                Provider::Local { api_key, .. } => api_key.clone(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                Some("key for ollama-api-key".into()),
+                Some("key for lm-studio-api-key".into()),
+                None
+            ]
+        );
+        let none = settings.with_local_keys(|_| None);
+        assert!(matches!(
+            none.provider,
+            Provider::Local { api_key: None, .. }
+        ));
     }
 
     #[test]

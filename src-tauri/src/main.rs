@@ -67,7 +67,13 @@ fn main() {
             commands::connect_youtube,
             commands::sync_youtube,
             commands::disconnect_youtube,
-            commands::open_policy_page
+            commands::open_policy_page,
+            commands::save_local_key,
+            commands::forget_local_key,
+            commands::local_keys,
+            commands::needs_welcome,
+            commands::finish_welcome,
+            commands::wipe_everything
         ])
         .build(tauri::generate_context!())
         .expect("Rostery could not start")

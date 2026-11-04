@@ -371,6 +371,23 @@ impl Store {
         Ok(removed as u64)
     }
 
+    /// One transaction. Every row in every table, settings included.
+    pub fn wipe(&mut self) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        for table in [
+            "plays",
+            "affinities",
+            "interests",
+            "demo_roasts",
+            "roasts",
+            "settings",
+        ] {
+            tx.execute(&format!("DELETE FROM {table}"), [])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn has_demo_data(&self) -> Result<bool> {
         Ok(self.conn.query_row(
             "SELECT EXISTS (SELECT 1 FROM plays WHERE origin = 'demo')",
@@ -1398,5 +1415,30 @@ mod tests {
         store.set_setting("n", &7_i64).unwrap();
         store.set_setting("n", &8_i64).unwrap();
         assert_eq!(store.get_setting::<i64>("n").unwrap(), Some(8));
+    }
+
+    #[test]
+    fn wipe_removes_all_rows() {
+        let mut store = Store::open_in_memory().unwrap();
+        crate::demo::load(&mut store, 1_800_000_000).unwrap();
+        store.set_setting("anything", &"at all").unwrap();
+        store
+            .save_roast("Claude Code", &named_roast(&[(0, "Gone")]), 1, true)
+            .unwrap();
+        store.wipe().unwrap();
+        for table in [
+            "plays",
+            "affinities",
+            "interests",
+            "demo_roasts",
+            "roasts",
+            "settings",
+        ] {
+            let left: i64 = store
+                .conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(left, 0, "{table}");
+        }
     }
 }

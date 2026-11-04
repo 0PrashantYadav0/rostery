@@ -6,7 +6,7 @@ use rostery_core::{
     export::{self, ExportOptions, ExportResult, SiteFile},
     ingest::ImportSummary,
     interests::{self, CreatorToTag},
-    llm::{self, Disclosure, Provider, ProviderStatus, Settings},
+    llm::{self, Disclosure, LocalServer, Provider, ProviderStatus, Settings},
     model::Totals,
     oauth,
     roast::{self, FinishedRoast, StoredRoast},
@@ -103,7 +103,7 @@ fn run_roast(state: &AppState, progress: impl Fn(&str) + Sync) -> Result<Finishe
     progress("Reading your history");
     let mut store = Store::open(&state.db_path)?;
     // Read once, here, so changing Settings during a Roast only changes the next one.
-    let settings = Settings::load(&store)?;
+    let settings = Settings::load(&store)?.with_local_keys(local_key);
     let provider = settings.provider_to_send_to()?;
     // Tags are worth having and not worth a Roast, so a failure becomes a sentence beside the finished
     // Roast, and the next Roast asks again.
@@ -201,7 +201,7 @@ pub fn creators_to_tag(state: State<'_, AppState>) -> Result<Vec<CreatorToTag>, 
 /// Spawns CLIs and calls the network, so it stays off the main thread and the screen does not wait on it.
 #[tauri::command(async)]
 pub fn provider_statuses(state: State<'_, AppState>) -> Result<Vec<ProviderStatus>, Error> {
-    let settings = Settings::load(&Store::open(&state.db_path)?)?;
+    let settings = Settings::load(&Store::open(&state.db_path)?)?.with_local_keys(local_key);
     Ok(llm::statuses(&settings))
 }
 
@@ -624,6 +624,95 @@ pub fn open_policy_page(app: AppHandle, page: String) -> Result<(), Error> {
         }
     };
     app.opener().open_url(url, None::<&str>).map_err(not_opened)
+}
+
+/// A local server's API key from the keychain. One that cannot be read is sent as no key, and the
+/// server's own refusal then says to add one.
+fn local_key(server: LocalServer) -> Option<String> {
+    secrets::get(server.key_name()).ok().flatten()
+}
+
+#[tauri::command(async)]
+pub fn save_local_key(server: LocalServer, key: String) -> Result<(), Error> {
+    let key = key.trim();
+    if key.is_empty() {
+        return forget_local_key(server);
+    }
+    secrets::set(server.key_name(), key)
+}
+
+#[tauri::command(async)]
+pub fn forget_local_key(server: LocalServer) -> Result<(), Error> {
+    secrets::delete(server.key_name())
+}
+
+/// Whether a local server has a key in the keychain. The key itself never reaches the webview.
+#[tauri::command(async)]
+pub fn local_keys() -> Result<Vec<LocalServer>, Error> {
+    let mut held = Vec::new();
+    for server in [LocalServer::Ollama, LocalServer::LmStudio] {
+        if secrets::get(server.key_name())?.is_some() {
+            held.push(server);
+        }
+    }
+    Ok(held)
+}
+
+const WELCOMED: &str = "welcomed";
+
+/// The welcome shows until the person finishes it or any history arrives, and again after Delete
+/// everything.
+#[tauri::command(async)]
+pub fn needs_welcome(state: State<'_, AppState>) -> Result<bool, Error> {
+    let store = Store::open(&state.db_path)?;
+    let totals = store.totals()?;
+    let welcomed = store.get_setting::<bool>(WELCOMED)?.unwrap_or(false);
+    Ok(!welcomed && totals.spotify.plays + totals.youtube.plays == 0)
+}
+
+#[tauri::command(async)]
+pub fn finish_welcome(state: State<'_, AppState>) -> Result<(), Error> {
+    Store::open(&state.db_path)?.set_setting(WELCOMED, &true)
+}
+
+/// Every keychain entry Rostery ever writes.
+const SECRET_NAMES: [&str; 7] = [
+    "github_token",
+    "vercel_token",
+    SPOTIFY_REFRESH,
+    GOOGLE_REFRESH,
+    GOOGLE_SECRET,
+    "ollama-api-key",
+    "lm-studio-api-key",
+];
+
+/// The command, apart from the keychain, so it can be tested without one.
+fn wipe_with(
+    state: &AppState,
+    confirmation: &str,
+    delete_secret: impl Fn(&str) -> Result<(), Error>,
+) -> Result<(), Error> {
+    if confirmation != "DELETE" {
+        return Err(Error::Settings(
+            "Type DELETE in capitals to delete everything. Nothing was deleted.".into(),
+        ));
+    }
+    for name in SECRET_NAMES {
+        delete_secret(name)?;
+    }
+    Store::open(&state.db_path)?.wipe()?;
+    let site = site_dir(state);
+    if site.exists() {
+        std::fs::remove_dir_all(site)?;
+    }
+    Ok(())
+}
+
+/// Every row, every keychain entry and the Share Site folder. Published sites stay where they were
+/// published, because Rostery cannot take them down.
+#[tauri::command(async)]
+pub fn wipe_everything(state: State<'_, AppState>, confirmation: String) -> Result<(), Error> {
+    wipe_with(&state, &confirmation, secrets::delete)
 }
 
 #[cfg(all(test, debug_assertions))]
@@ -1225,5 +1314,46 @@ mod tests {
         let path = dir.path().join("rostery.db");
         purge_old_youtube_data(&path);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn wipe_needs_exact_confirmation() {
+        let rig = Rig::with_history(CAT_REPLY, REPLY);
+        let deleted = Mutex::new(Vec::new());
+        for wrong in ["", "delete", "DELETE ", "Delete"] {
+            let message = wipe_with(&rig.state, wrong, |name| {
+                deleted.lock().unwrap().push(name.to_owned());
+                Ok(())
+            })
+            .unwrap_err()
+            .to_string();
+            assert!(message.contains("Nothing was deleted"), "{message}");
+        }
+        assert!(deleted.lock().unwrap().is_empty());
+        assert!(
+            Store::open(&rig.state.db_path)
+                .unwrap()
+                .totals()
+                .unwrap()
+                .spotify
+                .plays
+                > 0
+        );
+    }
+
+    #[test]
+    fn wipe_removes_rows_secrets_and_the_site() {
+        let rig = Rig::with_history(CAT_REPLY, REPLY);
+        export_to(&rig.state, &ExportOptions::default()).unwrap();
+        let deleted = Mutex::new(Vec::new());
+        wipe_with(&rig.state, "DELETE", |name| {
+            deleted.lock().unwrap().push(name.to_owned());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(deleted.into_inner().unwrap(), SECRET_NAMES);
+        let store = Store::open(&rig.state.db_path).unwrap();
+        assert_eq!(store.totals().unwrap().spotify.plays, 0);
+        assert!(!site_dir(&rig.state).exists());
     }
 }
