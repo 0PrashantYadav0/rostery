@@ -9,7 +9,8 @@
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
     "test:e2e": "vite build && playwright test",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "icon": "node scripts/make-icon.mjs && tauri icon src-tauri/icons/app-icon.png"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.4",
@@ -28,5 +29,6 @@
     "typescript": "^6.0.3",
     "vite": "^8.3.6",
     "vitest": "^5.1.0"
-  }
+  },
+  "packageManager": "pnpm@9.15.9"
 }

@@ -25,13 +25,31 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "dmg",
+      "app",
+      "deb",
+      "appimage"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "category": "Entertainment",
+    "shortDescription": "Get roasted by an AI that read your Spotify and YouTube history.",
+    "longDescription": "Rostery reads your Spotify and YouTube history on your own computer, draws it as a universe of planets, and has an AI write you a roast you can share.",
+    "copyright": "Copyright 2026 Prashant Kumar Yadav",
+    "license": "MIT",
+    "linux": {
+      "deb": {
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0"
+        ]
+      }
+    }
   }
 }
