@@ -4,6 +4,7 @@
     chooseExport,
     chooseFolder,
     clearDemo,
+    connectionStatus,
     errorMessage,
     hasDemoData,
     importPaths,
@@ -12,7 +13,8 @@
     totals as fetchTotals,
   } from '../../shared/api';
   import { describeImport } from '../../shared/summary';
-  import type { Totals } from '../../shared/types';
+  import type { Connections, Totals } from '../../shared/types';
+  import ConnectSpotify from '../components/ConnectSpotify.svelte';
   import Dial from '../Dial.svelte';
 
   let {
@@ -45,9 +47,29 @@
   let dropZone = $state<HTMLElement>();
   let tryDemo = $state<HTMLElement>();
 
+  let connections = $state<Connections>({ spotify: false, youtube: false });
+  let connectionsProblem = $state('');
+
   async function refresh() {
     [totals, hasDemo] = await Promise.all([fetchTotals(), hasDemoData()]);
     loaded = true;
+  }
+
+  // Its own call, because a locked keychain must not keep the rest of this screen from drawing.
+  async function refreshConnections() {
+    try {
+      connections = await connectionStatus();
+      connectionsProblem = '';
+    } catch (e) {
+      connectionsProblem = errorMessage(e);
+    }
+  }
+  refreshConnections();
+
+  /** A Connection synced or went, so what is stored changed. */
+  async function connectionChanged() {
+    await Promise.all([refresh().catch((e) => (error = errorMessage(e))), refreshConnections()]);
+    onstored();
   }
 
   /** Runs an action, then shows what is stored now, even when the action failed part way. */
@@ -236,6 +258,15 @@
     </div>
   </div>
 
+  <div class="connections">
+    <h2>Connections</h2>
+    <p>Optional extras over your Spotify and YouTube accounts. Each needs an app of your own, and Rostery keeps its token in your system keychain.</p>
+    {#if connectionsProblem}
+      <p class="error" role="alert">{connectionsProblem}</p>
+    {/if}
+    <ConnectSpotify connected={connections.spotify} onchange={connectionChanged} />
+  </div>
+
 </div>
 
 <style>
@@ -251,6 +282,23 @@
 
   header p {
     margin: 8px 0 0;
+    color: var(--dim);
+  }
+
+  .connections {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    margin-top: 48px;
+  }
+
+  .connections h2 {
+    margin: 0;
+    font: 500 26px/1.2 var(--serif);
+  }
+
+  .connections > p {
+    margin: 0;
     color: var(--dim);
   }
 

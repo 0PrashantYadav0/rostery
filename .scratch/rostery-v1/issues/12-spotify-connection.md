@@ -4,11 +4,13 @@
 
 **Blocked by:** 02, 10
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Rostery will not connect without explicit consent that quotes Spotify's policy
-- [ ] OAuth uses PKCE on the fixed loopback redirect and rejects a wrong `state`
-- [ ] Sync adds recent Plays and top artists, and is incremental
-- [ ] API Plays never overlap with an Export
-- [ ] Disconnect removes the API data and leaves the Export data
-- [ ] An expired or revoked token gets a message saying to reconnect
+- [x] Rostery will not connect without explicit consent that quotes Spotify's policy
+- [x] OAuth uses PKCE on the fixed loopback redirect and rejects a wrong `state`
+- [x] Sync adds recent Plays and top artists, and is incremental
+- [x] API Plays never overlap with an Export
+- [x] Disconnect removes the API data and leaves the Export data
+- [x] An expired or revoked token gets a message saying to reconnect
+
+The sign-in itself needs a real Spotify app and Premium, so it is a stop point 5 check for the user.

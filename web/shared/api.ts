@@ -4,7 +4,7 @@ import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebview, type DragDropEvent } from '@tauri-apps/api/webview';
 import { open } from '@tauri-apps/plugin-dialog';
 import { openUrl } from '@tauri-apps/plugin-opener';
-import type { CreatorToTag, DeployResult, DeployStatus, DeployTarget, Disclosure, ExportOptions, ExportResult, FinishedRoast, ImportSummary, ProviderStatus, Settings, StoredRoast, Totals, Universe, UniverseFilter } from './types';
+import type { Connections, CreatorToTag, DeployResult, DeployStatus, DeployTarget, Disclosure, ExportOptions, ExportResult, FinishedRoast, ImportSummary, ProviderStatus, Settings, StoredRoast, SyncSummary, Totals, Universe, UniverseFilter } from './types';
 
 export const totals = () => invoke<Totals>('totals');
 export const loadDemo = () => invoke<Totals>('load_demo');
@@ -36,6 +36,11 @@ export const openTokenPage = (target: DeployTarget) => invoke<void>('open_token_
 /** Exports fresh from `opts`, then publishes. */
 export const deployGithub = (repo: string, opts: ExportOptions) => invoke<DeployResult>('deploy_github', { repo, opts });
 /** Exports fresh from `opts`, publishes, and waits until Vercel says the deployment is ready. */
+export const connectionStatus = () => invoke<Connections>('connection_status');
+/** Opens Spotify's sign-in in the browser and waits for it to come back. Refused without consent. */
+export const connectSpotify = (clientId: string, consent: boolean) => invoke<SyncSummary>('connect_spotify', { clientId, consent });
+export const syncSpotify = () => invoke<SyncSummary>('sync_spotify');
+export const disconnectSpotify = () => invoke<Totals>('disconnect_spotify');
 export const deployVercel = (project: string, opts: ExportOptions) => invoke<DeployResult>('deploy_vercel', { project, opts });
 
 /** A short phrase each time a running Roast has something new to say. */

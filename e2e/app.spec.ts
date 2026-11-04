@@ -4750,3 +4750,70 @@ test('vercel publish shows url', async ({ page }) => {
     ['deploy', { project: 'my-universe', opts: expect.objectContaining({ includeRoast: true }) }],
   ]);
 });
+
+const ID = '0123456789abcdef0123456789abcdef';
+
+test('connect blocked without consent', async ({ page }) => {
+  const calls: unknown[] = [];
+  await installMockIpc(page, { ...withHistory, connect_spotify: (args: unknown) => (calls.push(args), { playsAdded: 0, affinities: 0, interests: 0, demoCleared: false }) });
+  await page.goto('/');
+  const connect = page.getByRole('button', { name: 'Connect Spotify' });
+  await expect(page.getByText('You do not need this. Your Spotify Export has your whole history')).toBeVisible();
+  await expect(page.getByText('"Do not analyze the Spotify Content')).toBeVisible();
+  await expect(page.getByText('"Do not use the Spotify Platform or any Spotify Content to train')).toBeVisible();
+  await expect(connect).toHaveAttribute('aria-disabled', 'true');
+  await expect(page.getByLabel('Client ID')).toHaveCount(0);
+  await connect.click({ force: true });
+  expect(calls).toEqual([]);
+
+  await page.getByRole('checkbox', { name: /I have read this/ }).check();
+  await expect(page.getByText('http://127.0.0.1:43117/callback')).toBeVisible();
+  await page.getByLabel('Client ID').fill(ID);
+  await connect.click();
+  await expect.poll(() => calls).toEqual([{ clientId: ID, consent: true }]);
+  await expect(page.getByText('Listening data from Spotify.')).toBeVisible();
+});
+
+test('sync summary shows', async ({ page }) => {
+  let synced = 0;
+  await installMockIpc(page, {
+    ...withHistory,
+    connection_status: () => ({ spotify: true, youtube: false }),
+    sync_spotify: () => (synced++, { playsAdded: 12, affinities: 50, interests: 87, demoCleared: true }),
+  });
+  await page.goto('/');
+  await expect(page.getByText('Spotify is connected.')).toBeVisible();
+  await page.getByRole('button', { name: 'Sync now' }).click();
+  await expect(page.getByText('Added 12 new plays, 50 top artists and 87 genres. The demo data is gone')).toBeVisible();
+  expect(synced).toBe(1);
+});
+
+test('disconnect clears status', async ({ page }) => {
+  let connected = true;
+  await installMockIpc(page, {
+    ...withHistory,
+    connection_status: () => ({ spotify: connected, youtube: false }),
+    disconnect_spotify: () => {
+      connected = false;
+      return someHistory;
+    },
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Disconnect' }).click();
+  await expect(page.getByRole('button', { name: 'Connect Spotify' })).toBeVisible();
+  await expect(page.getByText('Spotify is connected.')).toHaveCount(0);
+});
+
+test('a failed Spotify sign-in says why', async ({ page }) => {
+  await installMockIpc(page, {
+    ...withHistory,
+    connect_spotify: () => {
+      throw new Error('Spotify did not connect Rostery (access_denied). If you cancelled, press Connect again when you are ready.');
+    },
+  });
+  await page.goto('/');
+  await page.getByRole('checkbox', { name: /I have read this/ }).check();
+  await page.getByLabel('Client ID').fill(ID);
+  await page.getByRole('button', { name: 'Connect Spotify' }).click();
+  await expect(page.getByRole('alert')).toContainText('access_denied');
+});

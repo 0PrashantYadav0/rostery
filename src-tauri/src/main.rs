@@ -57,7 +57,11 @@ fn main() {
             commands::forget_deploy_token,
             commands::open_token_page,
             commands::deploy_github,
-            commands::deploy_vercel
+            commands::deploy_vercel,
+            commands::connection_status,
+            commands::connect_spotify,
+            commands::sync_spotify,
+            commands::disconnect_spotify
         ])
         .build(tauri::generate_context!())
         .expect("Rostery could not start")

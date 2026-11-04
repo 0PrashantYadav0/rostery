@@ -8,7 +8,9 @@ use rostery_core::{
     interests::{self, CreatorToTag},
     llm::{self, Disclosure, Provider, ProviderStatus, Settings},
     model::Totals,
+    oauth,
     roast::{self, FinishedRoast, StoredRoast},
+    spotify_api::{self, Connections, SyncSummary},
     store::Store,
     universe::{self, Universe, UniverseFilter},
     Error,
@@ -434,6 +436,93 @@ pub fn deploy_vercel(
     export_to(&state, &opts)?;
     let files = deploy::read_site(&site_dir(&state))?;
     deploy::vercel::publish(VERCEL_API, &token, &project, &files, VERCEL_POLL)
+}
+
+const SPOTIFY_REFRESH: &str = "spotify_refresh";
+const GOOGLE_REFRESH: &str = "google_refresh";
+/// Not secret, but the person's own, so it stays with the rest of what this Connection knows.
+const SPOTIFY_CLIENT: &str = "spotify_client_id";
+/// Long enough to make a Spotify app and sign in, the first time.
+const SIGN_IN_WAIT: Duration = Duration::from_secs(600);
+
+#[tauri::command(async)]
+pub fn connection_status() -> Result<Connections, Error> {
+    Ok(Connections {
+        spotify: secrets::get(SPOTIFY_REFRESH)?.is_some(),
+        youtube: secrets::get(GOOGLE_REFRESH)?.is_some(),
+    })
+}
+
+/// Real history arriving takes the demo's place, as an import does.
+fn sync_into(
+    store: &mut Store,
+    sync: impl FnOnce(&mut Store) -> Result<SyncSummary, Error>,
+) -> Result<SyncSummary, Error> {
+    let demo_cleared = store.has_demo_data()?;
+    if demo_cleared {
+        demo::clear(store)?;
+    }
+    Ok(SyncSummary {
+        demo_cleared,
+        ..sync(store)?
+    })
+}
+
+/// Opens Spotify's sign-in page, waits for the browser to come back, keeps the refresh token in the
+/// keychain and syncs once. Nothing is opened without consent.
+#[tauri::command(async)]
+pub fn connect_spotify(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    client_id: String,
+    consent: bool,
+) -> Result<SyncSummary, Error> {
+    spotify_api::check_connect(&client_id, consent)?;
+    let client_id = client_id.trim().to_owned();
+    let cfg = spotify_api::oauth_config(&client_id);
+    let tokens = oauth::authorize(
+        &cfg,
+        |url| app.opener().open_url(url, None::<&str>).map_err(not_opened),
+        SIGN_IN_WAIT,
+    )?;
+    let refresh = tokens.refresh_token.as_deref().ok_or_else(|| {
+        Error::Connection(
+            "Spotify did not give Rostery a way to sync again later. Press Connect again.".into(),
+        )
+    })?;
+    secrets::set(SPOTIFY_REFRESH, refresh)?;
+    let mut store = Store::open(&state.db_path)?;
+    store.set_setting(SPOTIFY_CLIENT, &client_id)?;
+    sync_into(&mut store, |store| {
+        spotify_api::sync(spotify_api::API, &tokens.access_token, store, now())
+    })
+}
+
+#[tauri::command(async)]
+pub fn sync_spotify(state: State<'_, AppState>) -> Result<SyncSummary, Error> {
+    let mut store = Store::open(&state.db_path)?;
+    let not_connected = || Error::Connection("Spotify is not connected. Connect it first.".into());
+    let client_id: String = store
+        .get_setting(SPOTIFY_CLIENT)?
+        .ok_or_else(not_connected)?;
+    let refresh = secrets::get(SPOTIFY_REFRESH)?.ok_or_else(not_connected)?;
+    let tokens = oauth::refresh(&spotify_api::oauth_config(&client_id), &refresh)?;
+    if let Some(newer) = tokens.refresh_token.as_deref().filter(|t| *t != refresh) {
+        secrets::set(SPOTIFY_REFRESH, newer)?;
+    }
+    sync_into(&mut store, |store| {
+        spotify_api::sync(spotify_api::API, &tokens.access_token, store, now())
+    })
+}
+
+/// The token goes from the keychain, and every piece of API data from the database. Export data stays.
+#[tauri::command(async)]
+pub fn disconnect_spotify(state: State<'_, AppState>) -> Result<Totals, Error> {
+    secrets::delete(SPOTIFY_REFRESH)?;
+    let mut store = Store::open(&state.db_path)?;
+    spotify_api::forget(&mut store)?;
+    store.delete_setting(SPOTIFY_CLIENT)?;
+    store.totals()
 }
 
 #[cfg(all(test, debug_assertions))]
@@ -1015,5 +1104,17 @@ mod tests {
         let rig = Rig::with_history(CAT_REPLY, REPLY);
         let message = exported_index(&rig.state).unwrap_err().to_string();
         assert!(message.contains("Press Export"), "{message}");
+    }
+
+    #[test]
+    fn a_sync_takes_the_place_of_demo_data_as_an_import_does() {
+        let rig = Rig::with_history(CAT_REPLY, REPLY);
+        let mut store = Store::open(&rig.state.db_path).unwrap();
+        demo::load(&mut store, now()).unwrap();
+        let summary = sync_into(&mut store, |_| Ok(SyncSummary::default())).unwrap();
+        assert!(summary.demo_cleared);
+        assert!(!store.has_demo_data().unwrap());
+        let again = sync_into(&mut store, |_| Ok(SyncSummary::default())).unwrap();
+        assert!(!again.demo_cleared);
     }
 }

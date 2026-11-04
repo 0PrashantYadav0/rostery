@@ -191,3 +191,17 @@ export interface DeployResult {
   url: string;
   dashboardUrl: string;
 }
+
+export interface SyncSummary {
+  playsAdded: number;
+  affinities: number;
+  interests: number;
+  /** Real history arrived, so the demo data went. */
+  demoCleared: boolean;
+}
+
+/** Which Connections hold a token in the keychain. */
+export interface Connections {
+  spotify: boolean;
+  youtube: boolean;
+}

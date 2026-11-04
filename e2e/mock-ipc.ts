@@ -24,6 +24,7 @@ export async function installMockIpc(page: Page, handlers: Handlers) {
     provider_disclosure: () => CLAUDE_CODE,
     creators_to_tag: () => [],
     deploy_status: () => ({ github: null, githubThroughGh: false, vercel: false }),
+    connection_status: () => ({ spotify: false, youtube: false }),
     ...handlers,
   };
   await page.exposeFunction('__mockIpc', (cmd: string, args: unknown) => {
