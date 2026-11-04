@@ -343,6 +343,34 @@ impl Store {
         Ok(plays as u64)
     }
 
+    /// YouTube's policies want stored API data refreshed or deleted within 30 days. One transaction:
+    /// Affinities and topic Interests fetched before `older_than` go, then AI tags for any Creator left
+    /// with nothing. Takeout Plays are not API data and stay. Returns how many rows went.
+    pub fn purge_youtube_api_data(&mut self, older_than: i64) -> Result<u64> {
+        let tx = self.conn.transaction()?;
+        let mut removed = 0;
+        for kind in crate::youtube_api::KINDS {
+            removed += tx.execute(
+                "DELETE FROM affinities WHERE source = 'youtube' AND kind = ?1 AND fetched_at < ?2",
+                params![kind, older_than],
+            )?;
+        }
+        removed += tx.execute(
+            "DELETE FROM interests WHERE source = 'youtube' AND origin = ?1 AND fetched_at < ?2",
+            params![crate::youtube_api::INTERESTS_ORIGIN, older_than],
+        )?;
+        tx.execute(
+            &format!(
+                "DELETE FROM interests WHERE source = 'youtube' AND origin = '{AI_ORIGIN}'
+                 AND creator NOT IN (SELECT creator FROM plays WHERE source = 'youtube')
+                 AND creator NOT IN (SELECT creator FROM affinities WHERE source = 'youtube')"
+            ),
+            [],
+        )?;
+        tx.commit()?;
+        Ok(removed as u64)
+    }
+
     pub fn has_demo_data(&self) -> Result<bool> {
         Ok(self.conn.query_row(
             "SELECT EXISTS (SELECT 1 FROM plays WHERE origin = 'demo')",

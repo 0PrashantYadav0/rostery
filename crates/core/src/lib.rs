@@ -15,5 +15,6 @@ pub mod roast;
 pub mod spotify_api;
 pub mod store;
 pub mod universe;
+pub mod youtube_api;
 
 pub use error::{Error, Result};
