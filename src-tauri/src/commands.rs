@@ -13,7 +13,7 @@ use rostery_core::{
     spotify_api::{self, Connections, SyncSummary},
     store::Store,
     universe::{self, Universe, UniverseFilter},
-    Error,
+    youtube_api, Error,
 };
 use std::path::PathBuf;
 use std::sync::{mpsc, Mutex, TryLockError};
@@ -523,6 +523,107 @@ pub fn disconnect_spotify(state: State<'_, AppState>) -> Result<Totals, Error> {
     spotify_api::forget(&mut store)?;
     store.delete_setting(SPOTIFY_CLIENT)?;
     store.totals()
+}
+
+const GOOGLE_SECRET: &str = "google_client_secret";
+const GOOGLE_CLIENT: &str = "google_client_id";
+const DAYS_30: i64 = 30 * 86_400;
+
+/// At startup, because YouTube's policies want API data refreshed or deleted within 30 days. A failure
+/// only goes to the log: the next startup tries again, and a store that cannot open says so elsewhere.
+pub fn purge_old_youtube_data(db_path: &std::path::Path) {
+    if !db_path.exists() {
+        return;
+    }
+    if let Err(e) =
+        Store::open(db_path).and_then(|mut store| store.purge_youtube_api_data(now() - DAYS_30))
+    {
+        eprintln!("Rostery could not remove YouTube API data older than 30 days: {e}");
+    }
+}
+
+/// Opens Google's sign-in page, waits for the browser to come back, keeps the refresh token and client
+/// secret in the keychain and syncs once.
+#[tauri::command(async)]
+pub fn connect_youtube(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    client_id: String,
+    client_secret: String,
+) -> Result<SyncSummary, Error> {
+    let (client_id, client_secret) = (client_id.trim().to_owned(), client_secret.trim().to_owned());
+    if !client_id.ends_with(".apps.googleusercontent.com") || client_secret.is_empty() {
+        return Err(Error::Connection(
+            "Paste both the Client ID, which ends in .apps.googleusercontent.com, and the Client secret \
+             of your Desktop app client from the Google Cloud console."
+                .into(),
+        ));
+    }
+    let cfg = youtube_api::oauth_config(&client_id, &client_secret);
+    let tokens = oauth::authorize(
+        &cfg,
+        |url| app.opener().open_url(url, None::<&str>).map_err(not_opened),
+        SIGN_IN_WAIT,
+    )?;
+    let refresh = tokens.refresh_token.as_deref().ok_or_else(|| {
+        Error::Connection(
+            "Google did not give Rostery a way to sync again later. Press Connect again.".into(),
+        )
+    })?;
+    secrets::set(GOOGLE_REFRESH, refresh)?;
+    secrets::set(GOOGLE_SECRET, &client_secret)?;
+    let mut store = Store::open(&state.db_path)?;
+    store.set_setting(GOOGLE_CLIENT, &client_id)?;
+    sync_into(&mut store, |store| {
+        youtube_api::sync(youtube_api::API, &tokens.access_token, store, now())
+    })
+}
+
+#[tauri::command(async)]
+pub fn sync_youtube(state: State<'_, AppState>) -> Result<SyncSummary, Error> {
+    let mut store = Store::open(&state.db_path)?;
+    let not_connected = || Error::Connection("YouTube is not connected. Connect it first.".into());
+    let client_id: String = store
+        .get_setting(GOOGLE_CLIENT)?
+        .ok_or_else(not_connected)?;
+    let secret = secrets::get(GOOGLE_SECRET)?.ok_or_else(not_connected)?;
+    let refresh = secrets::get(GOOGLE_REFRESH)?.ok_or_else(not_connected)?;
+    let tokens = oauth::refresh(&youtube_api::oauth_config(&client_id, &secret), &refresh)?;
+    if let Some(newer) = tokens.refresh_token.as_deref().filter(|t| *t != refresh) {
+        secrets::set(GOOGLE_REFRESH, newer)?;
+    }
+    sync_into(&mut store, |store| {
+        youtube_api::sync(youtube_api::API, &tokens.access_token, store, now())
+    })
+}
+
+/// The tokens go from the keychain, and every piece of API data from the database. Takeout stays.
+#[tauri::command(async)]
+pub fn disconnect_youtube(state: State<'_, AppState>) -> Result<Totals, Error> {
+    secrets::delete(GOOGLE_REFRESH)?;
+    secrets::delete(GOOGLE_SECRET)?;
+    let mut store = Store::open(&state.db_path)?;
+    youtube_api::forget(&mut store)?;
+    store.delete_setting(GOOGLE_CLIENT)?;
+    store.totals()
+}
+
+/// Fixed pages only, opened from here so the webview's opener stays limited to Source links.
+#[tauri::command]
+pub fn open_policy_page(app: AppHandle, page: String) -> Result<(), Error> {
+    let url = match page.as_str() {
+        "youtube-terms" => "https://www.youtube.com/t/terms",
+        "google-privacy" => "https://policies.google.com/privacy",
+        "spotify-developer-policy" => "https://developer.spotify.com/policy",
+        "google-cloud-console" => "https://console.cloud.google.com/apis/credentials",
+        "spotify-dashboard" => "https://developer.spotify.com/dashboard",
+        _ => {
+            return Err(Error::Connection(format!(
+                "Rostery has no page called {page}."
+            )))
+        }
+    };
+    app.opener().open_url(url, None::<&str>).map_err(not_opened)
 }
 
 #[cfg(all(test, debug_assertions))]
@@ -1116,5 +1217,13 @@ mod tests {
         assert!(!store.has_demo_data().unwrap());
         let again = sync_into(&mut store, |_| Ok(SyncSummary::default())).unwrap();
         assert!(!again.demo_cleared);
+    }
+
+    #[test]
+    fn startup_purge_leaves_a_missing_database_alone() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("rostery.db");
+        purge_old_youtube_data(&path);
+        assert!(!path.exists());
     }
 }

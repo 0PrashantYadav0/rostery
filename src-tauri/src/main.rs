@@ -27,8 +27,10 @@ fn main() {
         .plugin(stay_in_app())
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
+            let db_path = dir.join("rostery.db");
+            commands::purge_old_youtube_data(&db_path);
             app.manage(commands::AppState {
-                db_path: dir.join("rostery.db"),
+                db_path,
                 roast_running: Default::default(),
             });
             Ok(())
@@ -61,7 +63,11 @@ fn main() {
             commands::connection_status,
             commands::connect_spotify,
             commands::sync_spotify,
-            commands::disconnect_spotify
+            commands::disconnect_spotify,
+            commands::connect_youtube,
+            commands::sync_youtube,
+            commands::disconnect_youtube,
+            commands::open_policy_page
         ])
         .build(tauri::generate_context!())
         .expect("Rostery could not start")

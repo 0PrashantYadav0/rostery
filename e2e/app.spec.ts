@@ -4762,13 +4762,13 @@ test('connect blocked without consent', async ({ page }) => {
   await expect(page.getByText('"Do not analyze the Spotify Content')).toBeVisible();
   await expect(page.getByText('"Do not use the Spotify Platform or any Spotify Content to train')).toBeVisible();
   await expect(connect).toHaveAttribute('aria-disabled', 'true');
-  await expect(page.getByLabel('Client ID')).toHaveCount(0);
+  await expect(page.getByRole('region', { name: 'Connect Spotify' }).getByLabel('Client ID')).toHaveCount(0);
   await connect.click({ force: true });
   expect(calls).toEqual([]);
 
   await page.getByRole('checkbox', { name: /I have read this/ }).check();
   await expect(page.getByText('http://127.0.0.1:43117/callback')).toBeVisible();
-  await page.getByLabel('Client ID').fill(ID);
+  await page.getByRole('region', { name: 'Connect Spotify' }).getByLabel('Client ID').fill(ID);
   await connect.click();
   await expect.poll(() => calls).toEqual([{ clientId: ID, consent: true }]);
   await expect(page.getByText('Listening data from Spotify.')).toBeVisible();
@@ -4813,7 +4813,46 @@ test('a failed Spotify sign-in says why', async ({ page }) => {
   });
   await page.goto('/');
   await page.getByRole('checkbox', { name: /I have read this/ }).check();
-  await page.getByLabel('Client ID').fill(ID);
+  await page.getByRole('region', { name: 'Connect Spotify' }).getByLabel('Client ID').fill(ID);
   await page.getByRole('button', { name: 'Connect Spotify' }).click();
   await expect(page.getByRole('alert')).toContainText('access_denied');
+});
+
+test('youtube card explains takeout', async ({ page }) => {
+  const opened: unknown[] = [];
+  const connected: unknown[] = [];
+  await installMockIpc(page, {
+    ...withHistory,
+    open_policy_page: (args: unknown) => {
+      opened.push(args);
+    },
+    connect_youtube: (args: unknown) => (connected.push(args), { playsAdded: 0, affinities: 3, interests: 4, demoCleared: false }),
+  });
+  await page.goto('/');
+  const card = page.getByRole('region', { name: 'Connect YouTube' });
+  await expect(card).toContainText("YouTube's API has no watch history");
+  await expect(card).toContainText('Your Takeout is what makes your YouTube Universe real.');
+  await expect(card).toContainText('Google ends the connection after 7 days');
+  await card.getByRole('button', { name: 'YouTube Terms of Service' }).click();
+  await card.getByRole('button', { name: 'Google Privacy Policy' }).click();
+  await expect.poll(() => opened).toEqual([{ page: 'youtube-terms' }, { page: 'google-privacy' }]);
+
+  await card.getByLabel('Client ID').fill('123-abc.apps.googleusercontent.com');
+  await card.getByLabel('Client secret').fill('GOCSPX-secret');
+  await card.getByRole('button', { name: 'Connect YouTube' }).click();
+  await expect(card.getByText('Added 3 subscribed and liked channels and 4 topics.')).toBeVisible();
+  expect(connected).toEqual([{ clientId: '123-abc.apps.googleusercontent.com', clientSecret: 'GOCSPX-secret' }]);
+});
+
+test('youtube sync summary shows', async ({ page }) => {
+  await installMockIpc(page, {
+    ...withHistory,
+    connection_status: () => ({ spotify: false, youtube: true }),
+    sync_youtube: () => ({ playsAdded: 0, affinities: 41, interests: 60, demoCleared: false }),
+  });
+  await page.goto('/');
+  const card = page.getByRole('region', { name: 'Connect YouTube' });
+  await expect(card).toContainText('YouTube is connected.');
+  await card.getByRole('button', { name: 'Sync now' }).click();
+  await expect(card.getByText('Added 41 subscribed and liked channels and 60 topics.')).toBeVisible();
 });

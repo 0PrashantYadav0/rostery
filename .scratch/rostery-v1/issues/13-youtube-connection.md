@@ -4,12 +4,14 @@
 
 **Blocked by:** 12
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Subscriptions and likes become Affinities, and channel topics become Interests
-- [ ] API data older than 30 days is removed on startup, and Takeout Plays stay
-- [ ] Disconnect removes the API data
-- [ ] Quota and expired-token errors get useful messages
-- [ ] Links to the YouTube Terms and Google Privacy Policy are shown
+- [x] Subscriptions and likes become Affinities, and channel topics become Interests
+- [x] API data older than 30 days is removed on startup, and Takeout Plays stay
+- [x] Disconnect removes the API data
+- [x] Quota and expired-token errors get useful messages
+- [x] Links to the YouTube Terms and Google Privacy Policy are shown
 
 Stop point 5 follows this ticket.
+
+The sign-in itself needs a Google Cloud app, so it is a stop point 5 check for the user.

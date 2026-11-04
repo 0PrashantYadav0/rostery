@@ -15,6 +15,7 @@
   import { describeImport } from '../../shared/summary';
   import type { Connections, Totals } from '../../shared/types';
   import ConnectSpotify from '../components/ConnectSpotify.svelte';
+  import ConnectYoutube from '../components/ConnectYoutube.svelte';
   import Dial from '../Dial.svelte';
 
   let {
@@ -265,6 +266,7 @@
       <p class="error" role="alert">{connectionsProblem}</p>
     {/if}
     <ConnectSpotify connected={connections.spotify} onchange={connectionChanged} />
+    <ConnectYoutube connected={connections.youtube} onchange={connectionChanged} />
   </div>
 
 </div>

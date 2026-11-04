@@ -41,6 +41,13 @@ export const connectionStatus = () => invoke<Connections>('connection_status');
 export const connectSpotify = (clientId: string, consent: boolean) => invoke<SyncSummary>('connect_spotify', { clientId, consent });
 export const syncSpotify = () => invoke<SyncSummary>('sync_spotify');
 export const disconnectSpotify = () => invoke<Totals>('disconnect_spotify');
+/** Opens Google's sign-in in the browser and waits for it to come back. */
+export const connectYoutube = (clientId: string, clientSecret: string) => invoke<SyncSummary>('connect_youtube', { clientId, clientSecret });
+export const syncYoutube = () => invoke<SyncSummary>('sync_youtube');
+export const disconnectYoutube = () => invoke<Totals>('disconnect_youtube');
+/** A fixed page in the system browser, such as YouTube's terms. */
+export const openPolicyPage = (page: 'youtube-terms' | 'google-privacy' | 'spotify-developer-policy' | 'google-cloud-console' | 'spotify-dashboard') =>
+  invoke<void>('open_policy_page', { page });
 export const deployVercel = (project: string, opts: ExportOptions) => invoke<DeployResult>('deploy_vercel', { project, opts });
 
 /** A short phrase each time a running Roast has something new to say. */
