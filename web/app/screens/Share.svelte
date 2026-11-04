@@ -46,6 +46,14 @@
   const roast = $derived(run.latest?.roast);
   const spotify = $derived((have?.spotify.plays ?? 0) > 0);
   const youtube = $derived((have?.youtube.plays ?? 0) > 0);
+  // What actually goes: a Source the screen says has no history is left out, whatever its box says, so
+  // nothing reaches a site that the list below does not name.
+  const sent = $derived<ExportOptions>({
+    ...opts,
+    includeRoast: opts.includeRoast && Boolean(roast),
+    includeSpotify: opts.includeSpotify && spotify,
+    includeYoutube: opts.includeYoutube && youtube,
+  });
   const going = $derived.by(() => {
     const lines: string[] = [];
     if (opts.includeRoast && roast) lines.push(`Your Roast, "${roast.headline}", and its Verdict`);
@@ -73,7 +81,7 @@
   const save = () =>
     going.length &&
     act(async () => {
-      result = await exportSite(opts);
+      result = await exportSite(sent);
     });
 </script>
 
@@ -165,7 +173,7 @@
         publicNote={(name) => `The repo ${name} and its site are public. Anyone with the address can see them.`}
         waitNote="GitHub Pages can take a minute to show a new site."
         blocked={going.length ? '' : 'Choose your Roast or a Universe above first.'}
-        publish={(repo) => deployGithub(repo, opts)}
+        publish={(repo) => deployGithub(repo, sent)}
         onchange={loadHosts}
       />
       <Publish
@@ -179,7 +187,7 @@
         publicNote={(name) => `The Vercel project ${name} and its site are public. Anyone with the address can see them.`}
         waitNote="Rostery waited until Vercel said the site was ready, so it is live now."
         blocked={going.length ? '' : 'Choose your Roast or a Universe above first.'}
-        publish={(project) => deployVercel(project, opts)}
+        publish={(project) => deployVercel(project, sent)}
         onchange={loadHosts}
       />
     {/if}

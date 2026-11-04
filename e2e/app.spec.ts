@@ -4556,8 +4556,9 @@ test('the Roast is included by default, with the warning beside it', async ({ pa
 
   await page.getByRole('button', { name: 'Export' }).click();
   await expect(page.getByRole('status').filter({ hasText: 'Saved 210 KB to /data/site.' })).toBeVisible();
+  // No YouTube history is stored, so none goes, whatever its disabled box says.
   expect(sent).toEqual([
-    { displayName: 'Anonymous', includeRoast: true, includeSpotify: true, includeYoutube: true, includeItemTitles: false },
+    { displayName: 'Anonymous', includeRoast: true, includeSpotify: true, includeYoutube: false, includeItemTitles: false },
   ]);
 
   await roast.uncheck();
@@ -4645,7 +4646,7 @@ test('github publish shows url', async ({ page }) => {
   expect(published).toEqual([
     {
       repo: 'rostery-universe',
-      opts: { displayName: 'Anonymous', includeRoast: true, includeSpotify: true, includeYoutube: true, includeItemTitles: false },
+      opts: { displayName: 'Anonymous', includeRoast: true, includeSpotify: true, includeYoutube: false, includeItemTitles: false },
     },
   ]);
 });
@@ -4869,7 +4870,7 @@ test('first run shows welcome', async ({ page }) => {
   });
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Your taste, drawn as a universe, then roasted.' })).toBeVisible();
-  await expect(page.getByText('Nothing leaves this computer unless you send it.')).toBeVisible();
+  await expect(page.getByText('Your history leaves this computer only when you choose to send it.')).toBeVisible();
   await expect(page.getByText('Ready here: Claude Code.')).toBeVisible();
   await page.getByRole('button', { name: 'Add my history' }).click();
   await expect(page.getByRole('heading', { name: 'Add your history' })).toBeVisible();
