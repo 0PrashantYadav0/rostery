@@ -4,12 +4,14 @@
 
 **Blocked by:** 14
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] An original app icon
-- [ ] `pnpm tauri build` produces a working `.dmg` on macOS, and CI builds `.deb` and `.AppImage`
-- [ ] CI runs format, lint, Rust tests, Vitest and Playwright on macOS and Linux
-- [ ] README covers install, Exports, Providers, the honest privacy limits and the Spotify Connection warning
-- [ ] `LICENSE`, `CONTRIBUTING.md` and `SECURITY.md` exist
+- [x] An original app icon
+- [x] `pnpm tauri build` produces a working `.dmg` on macOS, and CI builds `.deb` and `.AppImage`
+- [x] CI runs format, lint, Rust tests, Vitest and Playwright on macOS and Linux
+- [x] README covers install, Exports, Providers, the honest privacy limits and the Spotify Connection warning
+- [x] `LICENSE`, `CONTRIBUTING.md` and `SECURITY.md` exist
 
 Stop point 6 follows this ticket.
+
+The .dmg was built and launched on macOS. The .deb and .AppImage are built by the release workflow on Linux.
