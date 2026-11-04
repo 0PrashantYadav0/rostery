@@ -61,15 +61,13 @@ fn push_with_pages(server: &mut ServerGuard, pages: usize) -> Vec<Mock> {
             .create(),
         server
             .mock("POST", "/repos/o/r/git/commits")
-            .match_body(Matcher::PartialJson(
-                json!({"tree": "tree", "parents": ["base"]}),
-            ))
+            .match_body(Matcher::PartialJson(json!({"tree": "tree", "parents": []})))
             .with_status(201)
             .with_body(r#"{"sha":"commit"}"#)
             .create(),
         server
             .mock("PATCH", "/repos/o/r/git/refs/heads/main")
-            .match_body(Matcher::Json(json!({"sha": "commit", "force": false})))
+            .match_body(Matcher::Json(json!({"sha": "commit", "force": true})))
             .with_status(200)
             .with_body("{}")
             .create(),

@@ -47,6 +47,27 @@ pub fn accepts(api: &str, token: &str) -> Result<bool> {
     }
 }
 
+/// The project name to publish to, refusing one that exists on the account unless Rostery made it, so a
+/// typed name can never take over someone's own site. `ours` is the projects Rostery has published to.
+pub fn check_name(api: &str, token: &str, name: &str, ours: &[String]) -> Result<String> {
+    let name = project_name(name);
+    if ours.contains(&name) {
+        return Ok(name);
+    }
+    let (status, value) = api_call(api, "GET", &format!("/v9/projects/{name}"), token, None)?;
+    match status {
+        404 => Ok(name),
+        200 => Err(Error::Deploy(format!(
+            "A Vercel project called {name} already exists, and Rostery did not make it, so Rostery will \
+             not publish over it. Choose another name."
+        ))),
+        _ => Err(Error::Deploy(format!(
+            "Vercel answered {status} when Rostery looked for the project {name}: {}",
+            said(&value)
+        ))),
+    }
+}
+
 /// Lowercase, with anything Vercel does not allow turned into a hyphen, at most 100 characters.
 pub fn project_name(name: &str) -> String {
     let mut out = String::new();

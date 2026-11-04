@@ -161,7 +161,7 @@ fn publish_waiting(
         }
     };
 
-    // A new repo's first commit can take a moment to appear.
+    // A new repo's first commit can take a moment to appear, and the branch has to exist to be moved.
     let mut head = None;
     for _ in 0..BRANCH_TRIES {
         let (status, found) = gh.call("GET", &format!("{path}/git/ref/heads/{branch}"), None)?;
@@ -171,7 +171,7 @@ fn publish_waiting(
         }
         std::thread::sleep(wait);
     }
-    let head = head.ok_or_else(|| {
+    head.ok_or_else(|| {
         Error::Deploy(format!(
             "GitHub has not finished creating {owner}/{repo}. Wait a minute, then publish again."
         ))
@@ -199,13 +199,15 @@ fn publish_waiting(
         &[201],
         "take the site's folder",
     )?;
+    // A commit with no parent, forced onto the branch, so an earlier site with things since left out does
+    // not stay in the branch's history. GitHub can still keep it by its commit ID until the repo is deleted.
     let commit = gh.expect(
         "POST",
         &format!("{path}/git/commits"),
         Some(&json!({
             "message": "Publish from Rostery",
             "tree": tree["sha"],
-            "parents": [head],
+            "parents": [],
         })),
         &[201],
         "take the commit",
@@ -213,7 +215,7 @@ fn publish_waiting(
     gh.expect(
         "PATCH",
         &format!("{path}/git/refs/heads/{branch}"),
-        Some(&json!({ "sha": commit["sha"], "force": false })),
+        Some(&json!({ "sha": commit["sha"], "force": true })),
         &[200],
         &format!("move {branch} to the new site"),
     )?;

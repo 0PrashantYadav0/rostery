@@ -179,3 +179,34 @@ fn project_name_is_normalised() {
     assert_eq!(vercel::project_name(&"x".repeat(150)).len(), 100);
     assert_eq!(vercel::project_name("!!!"), "rostery-universe");
 }
+
+#[test]
+fn a_project_rostery_did_not_make_is_refused() {
+    let mut server = Server::new();
+    let found = server
+        .mock("GET", "/v9/projects/portfolio")
+        .with_body("{}")
+        .create();
+    let message = vercel::check_name(&server.url(), TOKEN, "Portfolio", &[])
+        .unwrap_err()
+        .to_string();
+    assert!(message.contains("did not make it"), "{message}");
+    found.assert();
+
+    let _missing = server
+        .mock("GET", "/v9/projects/fresh")
+        .with_status(404)
+        .create();
+    assert_eq!(
+        vercel::check_name(&server.url(), TOKEN, "Fresh", &[]).unwrap(),
+        "fresh"
+    );
+
+    // One Rostery published to before is not asked about.
+    let asked = server.mock("GET", "/v9/projects/mine").expect(0).create();
+    assert_eq!(
+        vercel::check_name(&server.url(), TOKEN, "mine", &["mine".to_owned()]).unwrap(),
+        "mine"
+    );
+    asked.assert();
+}
