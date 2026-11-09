@@ -2,6 +2,8 @@
 
 use mockito::{Matcher, Server};
 use rostery_core::llm::{self, CompletionRequest, Disclosure, LocalServer, Provider, Settings};
+use rostery_core::store::Store;
+use rostery_core::{demo, digest, roast};
 use serde_json::{json, Value};
 use std::io::Read;
 use std::net::TcpListener;
@@ -794,4 +796,47 @@ fn only_the_codex_disclosure_mentions_its_agents_file() {
     assert!(said.contains("AGENTS.md"), "{said}");
     let said = disclosure(Provider::ClaudeCode { model: None }).sends_to;
     assert!(!said.contains("AGENTS.md"), "{said}");
+}
+
+/// The model a live test asks the real Ollama on this computer for, which must already be pulled.
+fn live_ollama() -> Provider {
+    Provider::Local {
+        server: LocalServer::Ollama,
+        base_url: LocalServer::Ollama.default_url().into(),
+        model: std::env::var("ROSTERY_OLLAMA_MODEL").unwrap_or_else(|_| "qwen2.5:1.5b".into()),
+        api_key: None,
+    }
+}
+
+fn live_ollama_roast_of_demo() -> rostery_core::Result<roast::Roast> {
+    const NOW: i64 = 1_800_000_000;
+    let mut store = Store::open_in_memory().unwrap();
+    demo::load(&mut store, NOW).unwrap();
+    let digest = digest::from_store(&store, NOW).unwrap();
+    roast::generate(
+        &live_ollama(),
+        &digest,
+        roast::default_system_prompt(),
+        llm::DEFAULT_TIMEOUT,
+    )
+}
+
+/// Needs `OLLAMA_CONTEXT_LENGTH=32768 ollama serve`, the way the error below tells a person to start it.
+#[test]
+#[ignore = "talks to the real Ollama, started with a long context"]
+fn live_ollama_roast() {
+    let started = Instant::now();
+    let roast = live_ollama_roast_of_demo().unwrap();
+    println!("took {:?}", started.elapsed());
+    println!("{}", serde_json::to_string_pretty(&roast).unwrap());
+    assert!(!roast.burns.is_empty() && !roast.headline.is_empty());
+}
+
+/// Needs a plain `ollama serve`, whose default context is too short for a Roast.
+#[test]
+#[ignore = "talks to the real Ollama, started with its default context"]
+fn live_ollama_short_context_says_how_to_raise_it() {
+    let said = live_ollama_roast_of_demo().unwrap_err().to_string();
+    println!("{said}");
+    assert!(said.contains("OLLAMA_CONTEXT_LENGTH=32768"), "{said}");
 }

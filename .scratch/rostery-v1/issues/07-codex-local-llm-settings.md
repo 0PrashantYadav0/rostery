@@ -10,7 +10,7 @@ A local server that wants an API key does not work yet. Task 14 adds the key, on
 
 - [x] Codex runs read-only and ephemeral on the user's own login
 - [x] An OpenAI-compatible local server that wants no API key works on mock servers and a real `llama-server`, and a URL that is not loopback, or an Ollama cloud model, gets flagged
-- [ ] A Roast works on a real Ollama, and a context length too short for it says so
+- [x] A Roast works on a real Ollama, and a context length too short for it says so
 - [x] Provider status is detected live, with a next step when something is missing
 - [x] The system prompt can be edited and reset, and the edit is used by the next Roast
 - [x] "See what gets sent" shows the exact Digest JSON
