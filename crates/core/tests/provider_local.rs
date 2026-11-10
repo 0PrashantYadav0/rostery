@@ -653,6 +653,84 @@ fn a_cloud_model_on_a_loopback_address_leaves_this_computer() {
     }
 }
 
+/// `ollama create my-buddy -f Modelfile` with `FROM gpt-oss:20b-cloud` makes an alias with an ordinary
+/// name that Ollama still sends to ollama.com. Only its own API says so, the way Ollama 0.40 answers.
+fn ollama_with_a_cloud_alias() -> mockito::ServerGuard {
+    let mut server = Server::new();
+    server
+        .mock("GET", "/v1/models")
+        .with_body(r#"{"data":[{"id":"my-buddy:latest"},{"id":"tiny"}]}"#)
+        .create();
+    server
+        .mock("GET", "/api/tags")
+        .with_body(
+            r#"{"models":[{"name":"my-buddy:latest","remote_host":"https://ollama.com:443",
+            "remote_model":"gpt-oss:20b"},{"name":"tiny"}]}"#,
+        )
+        .create();
+    server
+        .mock("POST", "/api/show")
+        .match_body(Matcher::PartialJson(json!({"model": "my-buddy:latest"})))
+        .with_body(r#"{"remote_host":"https://ollama.com:443","remote_model":"gpt-oss:20b"}"#)
+        .create();
+    server
+}
+
+#[test]
+fn a_cloud_alias_is_not_offered_and_a_roast_with_it_sends_nothing() {
+    let mut server = ollama_with_a_cloud_alias();
+    let url = base(&server);
+
+    let status = llm::local_status(LocalServer::Ollama, &url, "", None);
+    assert_eq!(status.models, ["tiny"]);
+    assert!(status.detail.contains("ollama.com"), "{status:?}");
+    let saved = llm::local_status(LocalServer::Ollama, &url, "my-buddy:latest", None);
+    assert!(
+        saved.detail.contains("my-buddy:latest is one of them"),
+        "{saved:?}"
+    );
+
+    let chat = server
+        .mock("POST", "/v1/chat/completions")
+        .with_body(answer("hello"))
+        .expect(0)
+        .create();
+    let alias = Provider::Local {
+        server: LocalServer::Ollama,
+        base_url: url.clone(),
+        model: "my-buddy:latest".into(),
+        api_key: None,
+    };
+    let said = llm::complete(&alias, &request(), LONG_ENOUGH)
+        .unwrap_err()
+        .to_string();
+    assert!(said.contains("https://ollama.com:443"), "{said}");
+    assert!(said.contains("sent nothing"), "{said}");
+    chat.assert();
+
+    // A model that runs here is asked about too, and goes ahead.
+    server
+        .mock("POST", "/api/show")
+        .match_body(Matcher::PartialJson(json!({"model": "tiny"})))
+        .with_body(r#"{"details":{}}"#)
+        .create();
+    let chat = server
+        .mock("POST", "/v1/chat/completions")
+        .with_body(answer("hello"))
+        .create();
+    let here = Provider::Local {
+        server: LocalServer::Ollama,
+        base_url: url,
+        model: "tiny".into(),
+        api_key: None,
+    };
+    assert_eq!(
+        llm::complete(&here, &request(), LONG_ENOUGH).unwrap(),
+        "hello"
+    );
+    chat.assert();
+}
+
 /// The screen fills in the first model offered, so a cloud one must never be offered.
 #[test]
 fn local_status_offers_no_cloud_model_and_says_where_a_saved_one_goes() {

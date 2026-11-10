@@ -650,6 +650,18 @@ fn local(
             "{label} has no model chosen. Choose one in Settings, then try again."
         )));
     }
+    // Settings said the Digest stays here, so it must not go to ollama.com under another name.
+    if on_this_computer(base_url) && !is_cloud_model(model) {
+        if let Some(host) = ollama_remote_host(base_url, model, api_key) {
+            return Err(Error::Provider(format!(
+                "{} is a cloud model under another name, so Ollama would send your Digest to {host}, \
+                 not keep it on this computer as Settings said. Rostery sent nothing. Choose a model \
+                 that runs here, or the cloud model's own name ending in cloud if you mean to send it \
+                 there, then try again.",
+                model.trim()
+            )));
+        }
+    }
     // No `response_format`, because some servers reject the kinds others accept. The prompt asks for
     // JSON, and the reply gets validated either way.
     let body = json!({
@@ -780,12 +792,61 @@ fn on_this_computer(url: &str) -> bool {
 
 /// Ollama passes a model with one of these endings on to ollama.com, through the same local port.
 /// Ollama itself only counts the ending on a tag, so `some-cloud` is a false alarm here, the safe way.
-// ponytail: this goes by the name, because that is all `/v1/models` gives and a disclosure calls no
-// network. An alias made with `ollama create` from a cloud model has an ordinary name and still goes
-// there. Only `/api/tags` says so, as `remote_host`, so ask that if aliases turn out to matter.
+// A disclosure calls no network, so it goes by the name. An alias made with `ollama create` from a cloud
+// model has an ordinary name, so `local` and `local_status` also ask Ollama with `ollama_remote_host`.
 fn is_cloud_model(model: &str) -> bool {
     let name = model.trim().to_ascii_lowercase();
     name.ends_with(":cloud") || name.ends_with("-cloud")
+}
+
+/// Ollama's own API sits beside its OpenAI one, at the same address without the `/v1`.
+fn ollama_api(base_url: &str, path: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    format!("{}/api/{path}", base.strip_suffix("/v1").unwrap_or(base))
+}
+
+/// Where Ollama would really send a model, when that is not here: an alias made with `ollama create`
+/// from a cloud model has an ordinary name, and only Ollama's own API says it is one. Nothing from a
+/// server that is not an Ollama, or that does not know the model, so its own error says so later.
+fn ollama_remote_host(base_url: &str, model: &str, api_key: Option<&str>) -> Option<String> {
+    let mut request = local_agent(LOCAL_STATUS_TIMEOUT).post(ollama_api(base_url, "show"));
+    if let Some(key) = api_key {
+        request = request.header("Authorization", format!("Bearer {key}"));
+    }
+    let mut response = request
+        .send(json!({"model": model.trim()}).to_string())
+        .ok()?;
+    let text = read_body(&mut response).ok()?;
+    let host = serde_json::from_str::<Value>(&text).ok()?["remote_host"]
+        .as_str()
+        .map(|host| roast::clean(host, MAX_MODEL_NAME))?;
+    Some(host).filter(|host| !host.is_empty())
+}
+
+/// The names in Ollama's list that it sends on to another host, for the models screen to leave out.
+fn ollama_remote_models(base_url: &str, api_key: Option<&str>) -> Vec<String> {
+    let mut request = local_agent(LOCAL_STATUS_TIMEOUT).get(ollama_api(base_url, "tags"));
+    if let Some(key) = api_key {
+        request = request.header("Authorization", format!("Bearer {key}"));
+    }
+    let text = request
+        .call()
+        .ok()
+        .and_then(|mut response| read_body(&mut response).ok())
+        .unwrap_or_default();
+    let tags = serde_json::from_str::<Value>(&text).unwrap_or_default();
+    tags["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| {
+            m["remote_host"]
+                .as_str()
+                .is_some_and(|host| !host.is_empty())
+        })
+        .filter_map(|m| m["name"].as_str())
+        .map(|name| roast::clean(name, MAX_MODEL_NAME))
+        .collect()
 }
 
 /// What the person reads before anything goes anywhere.
@@ -939,12 +1000,23 @@ pub fn local_status(
         api_key: None,
     };
     let listed = list_models(base_url, api_key, LOCAL_STATUS_TIMEOUT).map(|all| {
-        let (cloud, here): (Vec<_>, Vec<_>) = all.into_iter().partition(|m| is_cloud_model(m));
-        let left_out = if cloud.is_empty() {
-            ""
-        } else {
-            " Its cloud models are not listed, because they would send your Digest to ollama.com."
-        };
+        let remote = ollama_remote_models(base_url, api_key);
+        let (cloud, here): (Vec<_>, Vec<_>) = all
+            .into_iter()
+            .partition(|m| is_cloud_model(m) || remote.contains(m));
+        let mut left_out = String::new();
+        if !cloud.is_empty() {
+            left_out.push_str(
+                " Its cloud models are not listed, because they would send your Digest to ollama.com.",
+            );
+        }
+        if !is_cloud_model(model) && remote.iter().any(|m| m == model.trim()) {
+            left_out.push_str(&format!(
+                " {} is one of them under another name, so a Roast with it would stop before \
+                 sending anything.",
+                model.trim()
+            ));
+        }
         (here, left_out)
     });
     match listed {
