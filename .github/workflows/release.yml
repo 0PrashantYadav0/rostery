@@ -3,6 +3,8 @@ name: Release
 on:
   push:
     tags: ['v*']
+  # A run by hand builds every bundle and keeps them as workflow artifacts, with no release.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -49,9 +51,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_name }}
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
           releaseName: Rostery ${{ github.ref_name }}
           releaseBody: See the README for how to install and the honest limits of "local". The macOS builds are not notarized yet.
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+          uploadWorkflowArtifacts: true
